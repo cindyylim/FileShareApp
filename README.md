@@ -1,4 +1,7 @@
 # File Sync App
+<img width="741" height="405" alt="file-sync-app-login" src="https://github.com/user-attachments/assets/a7e8695e-378f-4f44-89d0-4b04ac9ddedd" />
+<img width="741" height="405" alt="file-sync-app-dashboard" src="https://github.com/user-attachments/assets/83e8f3f7-4ac1-4a11-8665-86921d3339b4" />
+
 
 A full-stack file synchronization application with AWS S3 storage and MongoDB Change Data Capture (CDC) for real-time cross-device sync.
 
