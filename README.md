@@ -125,11 +125,6 @@ Server integration tests run against an in-memory MongoDB instance — no extern
 cd server && npm install
 cd ../client && npm install
 
-<<<<<<< HEAD
-- File versioning and history
-- Folder support
-- Conflict resolution UI
-=======
 # Configure environment
 cp .env.example .env
 # Set MONGODB_URI, JWT_SECRET, and either AWS credentials or USE_LOCAL_STORAGE=true
@@ -213,6 +208,3 @@ FileShareApp/
 │   └── tests/
 └── .env.example
 ```
-
----
->>>>>>> 0eacac5 (chore: update .gitignore, enhance README, and add testing scripts for client and server)
