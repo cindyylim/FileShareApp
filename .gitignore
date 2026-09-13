@@ -29,3 +29,5 @@ dist/
 build/
 
 /server/uploads
+/server/test-uploads
+/server/.mongodb-binaries

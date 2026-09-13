@@ -3,232 +3,216 @@
 <img width="741" height="405" alt="file-sync-app-dashboard" src="https://github.com/user-attachments/assets/83e8f3f7-4ac1-4a11-8665-86921d3339b4" />
 
 
-A full-stack file synchronization application with AWS S3 storage and MongoDB Change Data Capture (CDC) for real-time cross-device sync.
+Full-stack file sync with direct-to-S3 uploads, MongoDB CDC, and resumable multipart transfers. The API coordinates metadata only — clients handle compression, chunking, and upload orchestration.
 
-## Features
+---
 
-- ✅ **File Upload/Download** - Multipart upload to S3 for large files
-- ✅ **Real-time Sync** - MongoDB Change Streams (CDC) for cross-device synchronization  
-- ✅ **User Authentication** - JWT-based secure authentication
-- ✅ **Modern UI** - Glassmorphism design with smooth animations
+## Highlights
 
-## Tech Stack
+- **Direct-to-S3 multipart uploads** — Clients upload 5 MB chunks via pre-signed URLs; the server only coordinates metadata, keeping bandwidth off the application tier.
+- **MongoDB Change Streams (CDC)** — File mutations propagate to all connected devices over Socket.io without polling or custom pub/sub infrastructure.
+- **Resumable uploads** — Per-chunk SHA-256 fingerprints let interrupted uploads skip already-transferred parts.
+- **Client-side gzip compression** — Text-based files are compressed before upload to reduce storage and transfer cost.
+- **Per-user storage quotas** — Enforced at upload init; usage tracked atomically on complete/delete.
+- **Automated test suite** — 57 tests across unit, integration, and component layers (Vitest + Supertest + mongodb-memory-server).
 
-### Backend
-- Node.js + Express
-- MongoDB (Replica Set required for CDC)
-- AWS S3 (file storage)
-- Socket.io (real-time events)
-- JWT (authentication)
+---
 
-### Frontend
-- React + Vite
-- Socket.io Client
-- Axios (API calls)
-- Modern CSS with Glassmorphism
+## System Design
 
-## Prerequisites
-
-1. **Node.js** (v16 or higher)
-2. **MongoDB** running as a replica set
-3. **AWS Account** with S3 bucket created
-4. **AWS Credentials** (Access Key + Secret Key)
-
-## Setup Instructions
-
-### 1. Clone and Install Dependencies
-
-```bash
-# Install backend dependencies
-cd server
-npm install
-
-# Install frontend dependencies  
-cd ../client
-npm install
-```
-
-### 2. Configure MongoDB Replica Set
-
-MongoDB Change Streams require a replica set. For local development:
-
-```bash
-# Using Docker Compose (easiest method)
-docker-compose up -d mongodb
-
-# OR manually with MongoDB:
-mongod --replSet rs0 --port 27017 --dbpath /data/db1
-mongosh
-> rs.initiate()
-```
-
-### 3. Create AWS S3 Bucket
-
-1. Log into AWS Console
-2. Navigate to S3
-3. Create a new bucket (e.g., `file-sync-app-files`)
-4. Note the bucket name and region
-5. Create IAM user with S3 permissions and get access keys
-
-### 4. Environment Configuration
-
-Copy `.env.example` to `.env` and fill in your values:
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env`:
-
-```env
-# MongoDB (Replica Set required!)
-MONGODB_URI=mongodb://localhost:27017/file-sync-app?replicaSet=rs0
-
-# Server
-PORT=5000
-NODE_ENV=development
-
-# JWT Secret (change this!)
-JWT_SECRET=your-super-secret-jwt-key-change-this
-
-# AWS S3
-AWS_ACCESS_KEY_ID=your-aws-access-key
-AWS_SECRET_ACCESS_KEY=your-aws-secret-key
-AWS_REGION=us-east-1
-S3_BUCKET_NAME=file-sync-app-files
-
-# Client URL
-CLIENT_URL=http://localhost:5173
-```
-
-### 5. Run the Application
-
-```bash
-# Terminal 1: Start backend
-cd server
-npm run dev
-
-# Terminal 2: Start frontend
-cd client
-npm run dev
-```
-
-The application will be available at:
-- Frontend: http://localhost:5173
-- Backend API: http://localhost:5000
-
-## Architecture
-
-### File Upload Flow
+### Upload path
 
 ```mermaid
 sequenceDiagram
-    participant C as Client
-    participant S as Server
-    participant M as MongoDB
+    participant Client
+    participant API as Express API
+    participant DB as MongoDB
     participant S3 as AWS S3
     participant CDC as CDC Service
-    
-    C->>S: 1. Init multipart upload
-    S->>M: Create File document
-    S->>S3: Create multipart upload
-    S->>C: Return uploadId
-    
-    loop For each chunk
-        C->>S: 2. Request pre-signed URL
-        S->>C: Return signed URL
-        C->>S3: 3. Upload chunk directly
-        S3->>C: Return ETag
+
+    Client->>API: POST /files/init-upload
+    API->>DB: Create File document (status: uploading)
+    API->>S3: CreateMultipartUpload
+    API-->>Client: fileId, uploadId, chunkSize
+
+    loop Each chunk (max 5 concurrent)
+        Client->>API: POST /files/presigned-url
+        API-->>Client: Pre-signed PUT URL
+        Client->>S3: PUT chunk directly
+        S3-->>Client: ETag
     end
-    
-    C->>S: 4. Complete upload with ETags
-    S->>S3: Complete multipart upload
-    S->>M: Update File (triggers CDC!)
-    M->>CDC: Change Stream event
-    CDC->>C: 5. Broadcast to all devices
+
+    Client->>API: POST /files/complete-upload
+    API->>S3: CompleteMultipartUpload
+    API->>DB: Update File (status: completed)
+    DB->>CDC: Change Stream event
+    CDC-->>Client: file:change via Socket.io
 ```
 
-**How it works:**
-
-1. **Client** initiates multipart upload
-2. **Server** creates upload session in MongoDB and S3
-3. **Server** generates pre-signed URLs for each chunk
-4. **Client** uploads chunks directly to S3 using pre-signed URLs (bypassing the server for data transfer)
-5. **Client** notifies server when all chunks uploaded
-6. **Server** completes multipart upload in S3
-7. **Server** updates MongoDB (triggers CDC event)
-8. **CDC Service** detects change and broadcasts to all connected clients
-
-### Real-time Sync with CDC
+### Real-time sync
 
 ```mermaid
 graph LR
-    A[Device A] -->|Upload| B[MongoDB]
+    A[Device A] -->|Upload / Delete| B[(MongoDB)]
     B -->|Change Stream| C[CDC Service]
     C -->|Socket.io| D[Device B]
     C -->|Socket.io| E[Device C]
-    C -->|Socket.io| A
 ```
 
-**How it works:**
+When a file is created, updated, or deleted, MongoDB emits a change event. The CDC service resolves the file owner and shared recipients, then broadcasts sanitized metadata to every active socket for those users. Delete events use a metadata cache so broadcasts work even after the document is gone.
 
-When a file is uploaded, modified, or deleted on any device:
-1. The change is saved to MongoDB
-2. MongoDB Change Streams detect the modification in real-time
-3. CDC Service receives the change event
-4. Event is broadcast via Socket.io to all of the user's connected devices
-5. Each device's UI updates automatically without page refresh
+### Design decisions
 
-When a file is uploaded/deleted:
-1. MongoDB document changes
-2. Change Stream detects the change
-3. CDC Service receives event
-4. Event is broadcast via Socket.io to all user's connected devices
-5. UI updates in real-time
+| Decision | Rationale |
+|----------|-----------|
+| Pre-signed URLs for chunk upload | Keeps the API stateless for data transfer; scales upload throughput independently of server capacity |
+| Change Streams over application-level events | Single source of truth — any write to MongoDB (API, admin script, migration) triggers sync automatically |
+| Chunk fingerprinting | Enables resume after network failure without re-uploading unchanged parts |
+| HTTP-only JWT cookies | Tokens not exposed to client-side JS; Socket.io auth reuses the same cookie on handshake |
+| `USE_LOCAL_STORAGE` dev mode | Full upload/download flow works without AWS credentials for local development and CI |
+| Express app extracted from server bootstrap | Routes testable via Supertest without starting Socket.io or CDC |
+
+---
+
+## Tech Stack
+
+| Layer | Technologies |
+|-------|-------------|
+| **Frontend** | React 18, Vite, Zustand, React Router, Axios, Socket.io Client, Pako (gzip) |
+| **Backend** | Node.js, Express, Mongoose, Socket.io, AWS SDK v3, bcrypt, JWT |
+| **Storage** | AWS S3 (multipart) or local filesystem (dev) |
+| **Database** | MongoDB (replica set for Change Streams) |
+| **Testing** | Vitest, Supertest, React Testing Library, mongodb-memory-server |
+
+---
+
+## Features
+
+**Authentication** — Register/login with bcrypt-hashed passwords; JWT stored in HTTP-only cookies; protected routes and Socket.io handshake.
+
+**File management** — Drag-and-drop upload, paginated file listing, pre-signed download URLs, soft-delete with storage reclamation.
+
+**Sharing** — Share files with other registered users by email; recipients see shared files in a dedicated tab with download access.
+
+**Upload pipeline** — 5 MB chunking, parallel uploads (concurrency limit of 5), progress tracking, gzip for text MIME types, SHA-256 file and chunk hashing.
+
+**Real-time sync** — Multi-tab and multi-device UI updates on upload, delete, and share events via CDC + WebSockets.
+
+---
 
 ## Testing
 
-### Manual Testing
+```bash
+cd server && npm test   # 36 tests — auth middleware, User model, auth/files routes, CDC service
+cd client && npm test   # 21 tests — fileUtils, authStore, Login component
+```
 
-1. **Authentication**
-   - Register a new account
-   - Login with credentials
-   
-2. **File Upload**
-   - Upload a small file (< 5MB)
-   - Upload a large file (> 10MB) to test multipart
-   - Check MongoDB and S3 for file data
-   
-3. **Multi-Device Sync**
-   - Open app in two browser windows
-   - Login with same account in both
-   - Upload file in window 1
-   - Verify file appears in window 2 automatically
-   - Delete file in window 2
-   - Verify file disappears from window 1
+Server integration tests run against an in-memory MongoDB instance — no external services required. Local storage mode is enabled automatically in the test environment.
 
-4. **File Download**
-   - Click download button
-   - Verify file downloads correctly
+---
 
-## Troubleshooting
+## Getting Started
 
-### "Change Streams require replica set"
-- Make sure MongoDB is running as a replica set
-- Connection string must include `?replicaSet=rs0`
+### Prerequisites
 
-### "S3 access denied"
-- Verify AWS credentials are correct
-- Ensure IAM user has S3 permissions
-- Check bucket name and region
+- Node.js 18+
+- MongoDB running as a **replica set** (required for Change Streams)
 
-### "Socket connection failed"
-- Check if backend server is running
-- Verify CORS settings
-- Check browser console for errors
+### Setup
 
-## Future Enhancements
+```bash
+# Install dependencies
+cd server && npm install
+cd ../client && npm install
 
+<<<<<<< HEAD
 - File versioning and history
 - Folder support
 - Conflict resolution UI
+=======
+# Configure environment
+cp .env.example .env
+# Set MONGODB_URI, JWT_SECRET, and either AWS credentials or USE_LOCAL_STORAGE=true
+```
+
+**MongoDB replica set (local):**
+
+```bash
+mongod --replSet rs0 --port 27017 --dbpath /data/db
+mongosh --eval "rs.initiate()"
+```
+
+**Environment variables** (see `.env.example`):
+
+| Variable | Purpose |
+|----------|---------|
+| `MONGODB_URI` | MongoDB connection string with `?replicaSet=rs0` |
+| `JWT_SECRET` | Signing key for auth tokens |
+| `USE_LOCAL_STORAGE` | `true` to skip AWS and store files on disk |
+| `AWS_*` / `S3_BUCKET_NAME` | Required when `USE_LOCAL_STORAGE` is not set |
+| `CLIENT_URL` | Frontend origin for CORS (default `http://localhost:5173`) |
+
+### Run
+
+```bash
+# Terminal 1 — API + CDC + WebSocket server
+cd server && npm run dev
+
+# Terminal 2 — React frontend (proxies /api and /socket.io)
+cd client && npm run dev
+```
+
+- Frontend: http://localhost:5173
+- API health check: http://localhost:5000/health
+
+### Quick verification
+
+1. Register and log in at `/register`
+2. Upload a file — watch progress bar and storage quota update
+3. Open a second browser window with the same account — file appears without refresh
+4. Delete in one window — disappears in the other
+
+---
+
+## API Overview
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/auth/register` | Create account |
+| `POST` | `/api/auth/login` | Authenticate |
+| `GET` | `/api/auth/me` | Current user + storage usage |
+| `POST` | `/api/files/init-upload` | Start multipart upload session |
+| `POST` | `/api/files/presigned-url` | Get chunk upload URL |
+| `POST` | `/api/files/complete-upload` | Finalize upload, trigger CDC |
+| `GET` | `/api/files` | List owned files (paginated) |
+| `GET` | `/api/files/shared` | List files shared with user |
+| `GET` | `/api/files/:id/download` | Get download URL |
+| `POST` | `/api/files/:id/share` | Share file with user by email |
+| `DELETE` | `/api/files/:id` | Delete file and reclaim storage |
+
+---
+
+## Project Structure
+
+```
+FileShareApp/
+├── client/
+│   ├── src/
+│   │   ├── components/     # Auth, FileManager (upload, list, share, sync indicator)
+│   │   ├── services/       # API client, Socket.io sync service
+│   │   ├── stores/         # Zustand auth state
+│   │   └── utils/          # Chunking, hashing, formatting
+│   └── tests/
+├── server/
+│   ├── app.js              # Express app factory (testable)
+│   ├── server.js           # HTTP + Socket.io + CDC bootstrap
+│   ├── routes/             # Auth and file endpoints
+│   ├── services/           # CDC change stream handler
+│   ├── models/             # User, File (Mongoose)
+│   ├── middleware/         # JWT authentication
+│   └── tests/
+└── .env.example
+```
+
+---
+>>>>>>> 0eacac5 (chore: update .gitignore, enhance README, and add testing scripts for client and server)

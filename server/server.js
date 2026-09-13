@@ -1,53 +1,17 @@
-import express from 'express';
 import http from 'http';
 import { Server } from 'socket.io';
-import cors from 'cors';
-import cookieParser from 'cookie-parser';
 import jwt from 'jsonwebtoken';
 import { connectDB, setupDBEventHandlers } from './config/db.js';
-import authRoutes from './routes/auth.js';
-import fileRoutes from './routes/files.js';
+import { createApp } from './app.js';
 import CDCService from './services/cdcService.js';
 
-const app = express();
+const app = createApp();
 const httpServer = http.createServer(app);
 const io = new Server(httpServer, {
     cors: {
         origin: process.env.CLIENT_URL || 'http://localhost:5173',
         credentials: true,
     }
-});
-
-// Middleware
-app.use(cors({
-    origin: process.env.CLIENT_URL || 'http://localhost:5173',
-    credentials: true,
-}));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(cookieParser());
-
-// Health check route
-app.get('/health', (req, res) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
-
-// API Routes
-app.use('/api/auth', authRoutes);
-app.use('/api/files', fileRoutes);
-
-// 404 handler
-app.use((req, res) => {
-    res.status(404).json({ error: 'Route not found' });
-});
-
-// Error handler
-app.use((err, req, res, next) => {
-    console.error('Server error:', err);
-    res.status(500).json({
-        error: 'Internal server error',
-        message: process.env.NODE_ENV === 'development' ? err.message : undefined,
-    });
 });
 
 // Initialize CDC Service
