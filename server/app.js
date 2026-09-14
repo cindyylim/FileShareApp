@@ -1,9 +1,11 @@
 import express from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
+import mongoose from 'mongoose';
 import authRoutes from './routes/auth.js';
 import fileRoutes from './routes/files.js';
 import { authRateLimit } from './middleware/rateLimit.js';
+import { USE_LOCAL_STORAGE } from './config/s3.js';
 
 /**
  * Create and configure the Express application (without Socket.io / CDC).
@@ -21,8 +23,18 @@ export const createApp = () => {
     app.use(cookieParser());
     app.disable('x-powered-by');
 
-    app.get('/health', (req, res) => {
-        res.json({ status: 'ok', timestamp: new Date().toISOString() });
+    app.get('/health', async (req, res) => {
+        const mongoState = mongoose.connection.readyState;
+        const mongoOk = mongoState === 1;
+
+        res.status(mongoOk ? 200 : 503).json({
+            status: mongoOk ? 'ok' : 'degraded',
+            timestamp: new Date().toISOString(),
+            checks: {
+                mongodb: mongoOk ? 'connected' : 'disconnected',
+                storage: USE_LOCAL_STORAGE ? 'local' : 's3',
+            },
+        });
     });
 
     app.use('/api/auth', authRateLimit, authRoutes);

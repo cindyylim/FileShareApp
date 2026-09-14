@@ -13,8 +13,8 @@ Full-stack file sync with direct-to-S3 uploads, MongoDB CDC, and resumable multi
 - **MongoDB Change Streams (CDC)** — File mutations propagate to all connected devices over Socket.io without polling or custom pub/sub infrastructure.
 - **Resumable uploads** — Per-chunk SHA-256 fingerprints let interrupted uploads skip already-transferred parts.
 - **Client-side gzip compression** — Text-based files are compressed before upload to reduce storage and transfer cost.
-- **Per-user storage quotas** — Enforced at upload init; usage tracked atomically on complete/delete.
-- **Automated test suite** — 57 tests across unit, integration, and component layers (Vitest + Supertest + mongodb-memory-server).
+- **Per-user storage quotas** — Enforced at upload init and complete; usage tracked atomically on complete/delete.
+- **Automated test suite** — Vitest + Supertest + React Testing Library with in-memory MongoDB for CI.
 
 ---
 
@@ -49,24 +49,12 @@ sequenceDiagram
     CDC-->>Client: file:change via Socket.io
 ```
 
-### Real-time sync
-
-```mermaid
-graph LR
-    A[Device A] -->|Upload / Delete| B[(MongoDB)]
-    B -->|Change Stream| C[CDC Service]
-    C -->|Socket.io| D[Device B]
-    C -->|Socket.io| E[Device C]
-```
-
-When a file is created, updated, or deleted, MongoDB emits a change event. The CDC service resolves the file owner and shared recipients, then broadcasts sanitized metadata to every active socket for those users. Delete events use a metadata cache so broadcasts work even after the document is gone.
-
 ### Design decisions
 
 | Decision | Rationale |
 |----------|-----------|
 | Pre-signed URLs for chunk upload | Keeps the API stateless for data transfer; scales upload throughput independently of server capacity |
-| Change Streams over application-level events | Single source of truth — any write to MongoDB (API, admin script, migration) triggers sync automatically |
+| Change Streams over application-level events | Single source of truth — any write to MongoDB triggers sync automatically |
 | Chunk fingerprinting | Enables resume after network failure without re-uploading unchanged parts |
 | HTTP-only JWT cookies | Tokens not exposed to client-side JS; Socket.io auth reuses the same cookie on handshake |
 | `USE_LOCAL_STORAGE` dev mode | Full upload/download flow works without AWS credentials for local development and CI |
@@ -103,11 +91,11 @@ When a file is created, updated, or deleted, MongoDB emits a change event. The C
 ## Testing
 
 ```bash
-cd server && npm test   # 36 tests — auth middleware, User model, auth/files routes, CDC service
-cd client && npm test   # 21 tests — fileUtils, authStore, Login component
+cd server && npm test
+cd client && npm test
 ```
 
-Server integration tests run against an in-memory MongoDB instance — no external services required. Local storage mode is enabled automatically in the test environment.
+CI runs both suites on every push via GitHub Actions. Server tests use an in-memory MongoDB instance — no external services required.
 
 ---
 
@@ -121,11 +109,8 @@ Server integration tests run against an in-memory MongoDB instance — no extern
 ### Setup
 
 ```bash
-# Install dependencies
 cd server && npm install
 cd ../client && npm install
-
-# Configure environment
 cp .env.example .env
 # Set MONGODB_URI, JWT_SECRET, and either AWS credentials or USE_LOCAL_STORAGE=true
 ```
@@ -136,8 +121,6 @@ cp .env.example .env
 mongod --replSet rs0 --port 27017 --dbpath /data/db
 mongosh --eval "rs.initiate()"
 ```
-
-**Environment variables** (see `.env.example`):
 
 | Variable | Purpose |
 |----------|---------|
@@ -150,22 +133,12 @@ mongosh --eval "rs.initiate()"
 ### Run
 
 ```bash
-# Terminal 1 — API + CDC + WebSocket server
-cd server && npm run dev
-
-# Terminal 2 — React frontend (proxies /api and /socket.io)
-cd client && npm run dev
+cd server && npm run dev   # API + CDC + WebSocket
+cd client && npm run dev   # React frontend
 ```
 
 - Frontend: http://localhost:5173
-- API health check: http://localhost:5000/health
-
-### Quick verification
-
-1. Register and log in at `/register`
-2. Upload a file — watch progress bar and storage quota update
-3. Open a second browser window with the same account — file appears without refresh
-4. Delete in one window — disappears in the other
+- Health check: http://localhost:5000/health
 
 ---
 
@@ -178,33 +151,14 @@ cd client && npm run dev
 | `GET` | `/api/auth/me` | Current user + storage usage |
 | `POST` | `/api/files/init-upload` | Start multipart upload session |
 | `POST` | `/api/files/presigned-url` | Get chunk upload URL |
+| `POST` | `/api/files/record-chunk` | Persist chunk metadata (resume) |
 | `POST` | `/api/files/complete-upload` | Finalize upload, trigger CDC |
+| `POST` | `/api/files/:id/abort-upload` | Cancel in-progress upload |
 | `GET` | `/api/files` | List owned files (paginated) |
 | `GET` | `/api/files/shared` | List files shared with user |
 | `GET` | `/api/files/:id/download` | Get download URL |
 | `POST` | `/api/files/:id/share` | Share file with user by email |
-| `DELETE` | `/api/files/:id` | Delete file and reclaim storage |
+| `DELETE` | `/api/files/:id/unshare/:userId` | Revoke share access |
+| `DELETE` | `/api/files/:id` | Soft-delete file and reclaim storage |
 
 ---
-
-## Project Structure
-
-```
-FileShareApp/
-├── client/
-│   ├── src/
-│   │   ├── components/     # Auth, FileManager (upload, list, share, sync indicator)
-│   │   ├── services/       # API client, Socket.io sync service
-│   │   ├── stores/         # Zustand auth state
-│   │   └── utils/          # Chunking, hashing, formatting
-│   └── tests/
-├── server/
-│   ├── app.js              # Express app factory (testable)
-│   ├── server.js           # HTTP + Socket.io + CDC bootstrap
-│   ├── routes/             # Auth and file endpoints
-│   ├── services/           # CDC change stream handler
-│   ├── models/             # User, File (Mongoose)
-│   ├── middleware/         # JWT authentication
-│   └── tests/
-└── .env.example
-```
