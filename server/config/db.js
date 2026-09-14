@@ -12,11 +12,7 @@ export const connectDB = async () => {
       throw new Error('MONGODB_URI is not defined');
     }
 
-    const conn = await mongoose.connect(MONGODB_URI, {
-      // Use new URL parser and unified topology
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
+    const conn = await mongoose.connect(MONGODB_URI);
 
     console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
     console.log(`📊 Database: ${conn.connection.name}`);

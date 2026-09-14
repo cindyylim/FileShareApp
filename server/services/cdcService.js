@@ -8,6 +8,7 @@ export class CDCService {
     constructor(io) {
         this.io = io;
         this.changeStream = null;
+        this.reconnectTimer = null;
         this.userSockets = new Map(); // Map of userId -> Set of socket IDs
         this.fileMetadataCache = new Map(); // Map of fileId -> { owner, sharedWith }
     }
@@ -16,6 +17,16 @@ export class CDCService {
      * Start watching for changes in File collection
      */
     async start() {
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
+
+        if (this.changeStream) {
+            await this.changeStream.close().catch(() => {});
+            this.changeStream = null;
+        }
+
         try {
             // Pre-populate fileMetadataCache from database
             const existingFiles = await File.find({}, '_id owner sharedWith');
@@ -51,8 +62,12 @@ export class CDCService {
 
             this.changeStream.on('error', (error) => {
                 console.error('❌ CDC Service: Change Stream error:', error);
-                // Attempt to reconnect
-                setTimeout(() => this.start(), 5000);
+                if (!this.reconnectTimer) {
+                    this.reconnectTimer = setTimeout(() => {
+                        this.reconnectTimer = null;
+                        this.start();
+                    }, 5000);
+                }
             });
 
             this.changeStream.on('close', () => {
@@ -182,9 +197,10 @@ export class CDCService {
             path: file.path,
             uploadStatus: file.uploadStatus,
             isDeleted: file.isDeleted,
+            owner: file.owner,
+            sharedWith: file.sharedWith,
             createdAt: file.createdAt,
             updatedAt: file.updatedAt,
-            // Don't send S3 details or chunks to client
         };
     }
 
@@ -192,8 +208,14 @@ export class CDCService {
      * Stop the change stream
      */
     async stop() {
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
+
         if (this.changeStream) {
             await this.changeStream.close();
+            this.changeStream = null;
             console.log('⏹️  CDC Service: Change Stream stopped');
         }
     }

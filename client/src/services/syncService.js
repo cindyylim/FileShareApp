@@ -2,10 +2,8 @@ import { io } from 'socket.io-client';
 
 const SOCKET_URL = '/';
 
-/**
- * Socket.io client instance
- */
 let socket = null;
+const fileChangeHandlers = new Set();
 
 /**
  * Initialize socket connection
@@ -65,21 +63,30 @@ export const disconnectSocket = () => {
 /**
  * Listen for file changes from CDC
  */
+const dispatchFileChange = (data) => {
+    fileChangeHandlers.forEach((handler) => handler(data));
+};
+
 export const onFileChange = (callback) => {
     if (!socket) {
         console.warn('Socket not initialized');
         return;
     }
 
-    socket.on('file:change', callback);
+    fileChangeHandlers.add(callback);
+    socket.off('file:change', dispatchFileChange);
+    socket.on('file:change', dispatchFileChange);
 };
 
-/**
- * Remove file change listener
- */
-export const offFileChange = () => {
-    if (socket) {
-        socket.off('file:change');
+export const offFileChange = (callback) => {
+    if (callback) {
+        fileChangeHandlers.delete(callback);
+    } else {
+        fileChangeHandlers.clear();
+    }
+
+    if (socket && fileChangeHandlers.size === 0) {
+        socket.off('file:change', dispatchFileChange);
     }
 };
 

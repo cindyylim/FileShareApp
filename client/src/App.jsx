@@ -3,14 +3,19 @@ import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-d
 import Login from './components/Auth/Login';
 import Register from './components/Auth/Register';
 import Dashboard from './pages/Dashboard';
-import { initSocket, disconnectSocket } from './services/syncService';
+import ProtectedRoute from './components/ProtectedRoute';
+import { initSocket } from './services/syncService';
 import useAuthStore from './stores/authStore';
 
 function App() {
     const { isAuthenticated, checkAuth, loading } = useAuthStore();
 
     useEffect(() => {
-        checkAuth();
+        checkAuth().then(() => {
+            if (useAuthStore.getState().isAuthenticated()) {
+                initSocket();
+            }
+        });
     }, []);
 
     if (loading) {
@@ -21,10 +26,6 @@ function App() {
         );
     }
 
-    // Protected Route wrapper
-    const ProtectedRoute = ({ children }) => {
-        return isAuthenticated() ? children : <Navigate to="/login" />;
-    };
     return (
         <Router>
             <Routes>

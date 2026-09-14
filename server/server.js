@@ -1,4 +1,5 @@
 import http from 'http';
+import mongoose from 'mongoose';
 import { Server } from 'socket.io';
 import jwt from 'jsonwebtoken';
 import { connectDB, setupDBEventHandlers } from './config/db.js';
@@ -95,31 +96,21 @@ const startServer = async () => {
     }
 };
 
-// Graceful shutdown
-process.on('SIGTERM', async () => {
-    console.log('\n⏹️  SIGTERM received, shutting down gracefully...');
+const shutdown = async (signal) => {
+    console.log(`\n⏹️  ${signal} received, shutting down gracefully...`);
 
     if (cdcService) {
         await cdcService.stop();
     }
 
-    httpServer.close(() => {
+    httpServer.close(async () => {
+        await mongoose.disconnect();
         console.log('✅ Server closed');
         process.exit(0);
     });
-});
+};
 
-process.on('SIGINT', async () => {
-    console.log('\n⏹️  SIGINT received, shutting down gracefully...');
-
-    if (cdcService) {
-        await cdcService.stop();
-    }
-
-    httpServer.close(() => {
-        console.log('✅ Server closed');
-        process.exit(0);
-    });
-});
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 startServer();

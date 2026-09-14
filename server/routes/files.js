@@ -1,7 +1,6 @@
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
-import crypto from 'crypto';
 import {
     CreateMultipartUploadCommand,
     CompleteMultipartUploadCommand,
@@ -20,6 +19,7 @@ import User from '../models/User.js';
 import { GetObjectCommand } from '@aws-sdk/client-s3';
 import mongoose from 'mongoose';
 import { incrementStorageUsed, storagePayload } from '../utils/storage.js';
+import { saveChunk, assembleFileFromChunks, deleteLocalFile } from '../services/localStorageService.js';
 
 const router = express.Router();
 
@@ -286,15 +286,7 @@ router.put('/local-upload', authenticateToken, express.raw({ type: '*/*', limit:
             return res.status(404).json({ error: 'File not found or unauthorized' });
         }
 
-        const chunkDir = path.join(LOCAL_STORAGE_DIR, 'chunks', fileId.toString());
-        await fs.promises.mkdir(chunkDir, { recursive: true });
-
-        const chunkPath = path.join(chunkDir, `part-${partNumber}`);
-        await fs.promises.writeFile(chunkPath, req.body);
-
-        const md5Hash = crypto.createHash('md5').update(req.body).digest('hex');
-        const etag = `"${md5Hash}"`;
-
+        const etag = await saveChunk(fileId, partNumber, req.body);
         const partNum = parseInt(partNumber, 10);
         upsertChunk(file.chunks, {
             partNumber: partNum,
@@ -388,33 +380,7 @@ router.post('/complete-upload', authenticateToken, async (req, res) => {
         }
 
         if (USE_LOCAL_STORAGE) {
-            const finalFilePath = path.join(LOCAL_STORAGE_DIR, file.s3Key);
-            const finalDirPath = path.dirname(finalFilePath);
-            await fs.promises.mkdir(finalDirPath, { recursive: true });
-
-            const writeStream = fs.createWriteStream(finalFilePath);
-            const sortedParts = [...parts].sort((a, b) => a.partNumber - b.partNumber);
-            const chunkDir = path.join(LOCAL_STORAGE_DIR, 'chunks', fileId.toString());
-
-            for (const part of sortedParts) {
-                const chunkPath = path.join(chunkDir, `part-${part.partNumber}`);
-                if (!fs.existsSync(chunkPath)) {
-                    throw new Error(`Missing chunk ${part.partNumber}`);
-                }
-                const chunkBuffer = await fs.promises.readFile(chunkPath);
-                writeStream.write(chunkBuffer);
-            }
-
-            await new Promise((resolve, reject) => {
-                writeStream.end(resolve);
-                writeStream.on('error', reject);
-            });
-
-            try {
-                await fs.promises.rm(chunkDir, { recursive: true, force: true });
-            } catch (rmErr) {
-                console.warn('Local chunk folder cleanup error:', rmErr.message);
-            }
+            await assembleFileFromChunks(fileId, file.s3Key, parts);
         } else {
             // Complete multipart upload in S3
             const completeCommand = new CompleteMultipartUploadCommand({
@@ -627,15 +593,10 @@ router.delete('/:id', authenticateToken, validateObjectId('id'), async (req, res
         }
 
         if (USE_LOCAL_STORAGE) {
-            const filePath = path.join(LOCAL_STORAGE_DIR, file.s3Key);
-            if (fs.existsSync(filePath)) {
-                try {
-                    await fs.promises.unlink(filePath);
-                    const folder = path.dirname(filePath);
-                    await fs.promises.rmdir(folder).catch(() => { });
-                } catch (unlinkErr) {
-                    console.warn('Could not delete local file:', unlinkErr.message);
-                }
+            try {
+                await deleteLocalFile(file.s3Key);
+            } catch (unlinkErr) {
+                console.warn('Could not delete local file:', unlinkErr.message);
             }
         } else if (file.uploadStatus === 'completed') {
             const deleteCommand = new DeleteObjectCommand({
@@ -663,6 +624,40 @@ router.delete('/:id', authenticateToken, validateObjectId('id'), async (req, res
     } catch (error) {
         console.error('Delete file error:', error);
         res.status(500).json({ error: 'Server error while deleting file' });
+    }
+});
+
+/**
+ * POST /api/files/:id/abort-upload
+ * Abort an in-progress multipart upload
+ */
+router.post('/:id/abort-upload', authenticateToken, validateObjectId('id'), async (req, res) => {
+    try {
+        const file = await File.findOne({
+            _id: req.params.id,
+            owner: req.user._id,
+            uploadStatus: 'uploading',
+        });
+
+        if (!file) {
+            return res.status(404).json({ error: 'Active upload not found' });
+        }
+
+        if (!USE_LOCAL_STORAGE && file.uploadId) {
+            const abortCommand = new AbortMultipartUploadCommand({
+                Bucket: S3_CONFIG.BUCKET_NAME,
+                Key: file.s3Key,
+                UploadId: file.uploadId,
+            });
+            await s3Client.send(abortCommand);
+        }
+
+        await File.findByIdAndDelete(file._id);
+
+        res.json({ message: 'Upload aborted' });
+    } catch (error) {
+        console.error('Abort upload error:', error);
+        res.status(500).json({ error: 'Server error while aborting upload' });
     }
 });
 
