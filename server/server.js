@@ -2,8 +2,11 @@ import http from 'http';
 import { Server } from 'socket.io';
 import jwt from 'jsonwebtoken';
 import { connectDB, setupDBEventHandlers } from './config/db.js';
+import { validateEnv } from './config/env.js';
 import { createApp } from './app.js';
 import CDCService from './services/cdcService.js';
+
+validateEnv();
 
 const app = createApp();
 const httpServer = http.createServer(app);

@@ -11,8 +11,8 @@ const check = async () => {
 
     // 1. Check Environment Variables
     const required = useLocalStorage
-        ? ['MONGODB_URI']
-        : ['MONGODB_URI', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'S3_BUCKET_NAME', 'AWS_REGION'];
+        ? ['MONGODB_URI', 'JWT_SECRET']
+        : ['MONGODB_URI', 'JWT_SECRET', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'S3_BUCKET_NAME', 'AWS_REGION'];
     const missing = required.filter(key => !process.env[key] || process.env[key].includes('your-'));
 
     if (missing.length > 0) {

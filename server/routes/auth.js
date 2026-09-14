@@ -20,23 +20,24 @@ router.post('/register', async (req, res) => {
         }
 
         // Check if user already exists
+        const normalizedEmail = email.toLowerCase().trim();
+
         const existingUser = await User.findOne({
-            $or: [{ email }, { username }]
+            $or: [{ email: normalizedEmail }, { username }]
         });
 
         if (existingUser) {
             return res.status(400).json({
-                error: existingUser.email === email
+                error: existingUser.email === normalizedEmail
                     ? 'Email already registered'
                     : 'Username already taken'
             });
         }
 
-        // Create new user
         const user = new User({
             username,
-            email,
-            password, // Will be hashed by pre-save hook
+            email: normalizedEmail,
+            password,
         });
 
         await user.save();
@@ -82,8 +83,7 @@ router.post('/login', async (req, res) => {
             });
         }
 
-        // Find user
-        const user = await User.findOne({ email });
+        const user = await User.findOne({ email: email.toLowerCase().trim() });
 
         if (!user) {
             return res.status(401).json({

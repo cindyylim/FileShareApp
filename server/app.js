@@ -3,6 +3,7 @@ import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import authRoutes from './routes/auth.js';
 import fileRoutes from './routes/files.js';
+import { authRateLimit } from './middleware/rateLimit.js';
 
 /**
  * Create and configure the Express application (without Socket.io / CDC).
@@ -15,15 +16,16 @@ export const createApp = () => {
         origin: process.env.CLIENT_URL || 'http://localhost:5173',
         credentials: true,
     }));
-    app.use(express.json());
-    app.use(express.urlencoded({ extended: true }));
+    app.use(express.json({ limit: '1mb' }));
+    app.use(express.urlencoded({ extended: true, limit: '1mb' }));
     app.use(cookieParser());
+    app.disable('x-powered-by');
 
     app.get('/health', (req, res) => {
         res.json({ status: 'ok', timestamp: new Date().toISOString() });
     });
 
-    app.use('/api/auth', authRoutes);
+    app.use('/api/auth', authRateLimit, authRoutes);
     app.use('/api/files', fileRoutes);
 
     app.use((req, res) => {

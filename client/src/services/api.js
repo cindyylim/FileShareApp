@@ -63,6 +63,8 @@ export const fileAPI = {
     initUpload: (data) => api.post('/files/init-upload', data),
     getPresignedUrl: (data) => api.post('/files/presigned-url', data),
     completeUpload: (data) => api.post('/files/complete-upload', data),
+    recordChunk: (data) => api.post('/files/record-chunk', data),
+    abortUpload: (fileId) => api.post(`/files/${fileId}/abort-upload`),
     download: (id) => api.get(`/files/${id}/download`),
     delete: (id) => api.delete(`/files/${id}`),
     getUploadStatus: (id) => api.get(`/files/${id}/upload-status`),
@@ -74,13 +76,18 @@ export const fileAPI = {
 /**
  * Direct upload to S3 using pre-signed URL
  */
-export const uploadToS3 = async (presignedUrl, chunk) => {
+export const uploadToS3 = async (presignedUrl, chunk, fingerprint) => {
+    const isLocalUpload = presignedUrl.startsWith('/');
+    const headers = { 'Content-Type': 'application/octet-stream' };
+    if (isLocalUpload && fingerprint) {
+        headers['X-Chunk-Fingerprint'] = fingerprint;
+    }
+
     const response = await fetch(presignedUrl, {
         method: 'PUT',
         body: chunk,
-        headers: {
-            'Content-Type': 'application/octet-stream',
-        },
+        credentials: isLocalUpload ? 'include' : 'omit',
+        headers,
     });
 
     if (!response.ok) {
