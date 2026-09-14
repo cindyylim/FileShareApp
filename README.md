@@ -57,8 +57,6 @@ sequenceDiagram
 | Change Streams over application-level events | Single source of truth — any write to MongoDB triggers sync automatically |
 | Chunk fingerprinting | Enables resume after network failure without re-uploading unchanged parts |
 | HTTP-only JWT cookies | Tokens not exposed to client-side JS; Socket.io auth reuses the same cookie on handshake |
-| `USE_LOCAL_STORAGE` dev mode | Full upload/download flow works without AWS credentials for local development and CI |
-| Express app extracted from server bootstrap | Routes testable via Supertest without starting Socket.io or CDC |
 
 ---
 
