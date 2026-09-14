@@ -164,7 +164,18 @@ function FileUpload({ onUploadComplete }) {
                     const { presignedUrl } = urlResponse.data;
 
                     // Upload to S3
-                    const etag = await uploadToS3(presignedUrl, chunk);
+                    const etag = await uploadToS3(presignedUrl, chunk, fingerprint);
+
+                    if (!presignedUrl.startsWith('/')) {
+                        await fileAPI.recordChunk({
+                            fileId,
+                            uploadId,
+                            partNumber,
+                            etag,
+                            size: chunk.size,
+                            fingerprint,
+                        });
+                    }
 
                     // Update progress
                     completedChunks++;
