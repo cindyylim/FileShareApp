@@ -1,9 +1,9 @@
 import { beforeAll, afterAll, afterEach } from 'vitest';
-import { MongoMemoryServer } from 'mongodb-memory-server';
+import { MongoMemoryReplSet } from 'mongodb-memory-server';
 import mongoose from 'mongoose';
 import path from 'path';
 
-let mongoServer;
+let mongoReplSet;
 
 beforeAll(async () => {
     process.env.JWT_SECRET = 'test-jwt-secret';
@@ -12,14 +12,15 @@ beforeAll(async () => {
     process.env.NODE_ENV = 'test';
     process.env.MONGOMS_DOWNLOAD_DIR = path.join(process.cwd(), '.mongodb-binaries');
 
-    mongoServer = await MongoMemoryServer.create();
-    await mongoose.connect(mongoServer.getUri());
+    mongoReplSet = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
+    await mongoReplSet.waitUntilRunning();
+    await mongoose.connect(mongoReplSet.getUri());
 });
 
 afterAll(async () => {
     await mongoose.disconnect();
-    if (mongoServer) {
-        await mongoServer.stop();
+    if (mongoReplSet) {
+        await mongoReplSet.stop();
     }
 });
 

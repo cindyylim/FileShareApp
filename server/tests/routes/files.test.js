@@ -206,7 +206,57 @@ describe('files routes', () => {
             expect(res.body.message).toBe('File deleted successfully');
 
             const deleted = await File.findById(file._id);
-            expect(deleted).toBeNull();
+            expect(deleted.isDeleted).toBe(true);
+            expect(deleted.sharedWith).toHaveLength(0);
+        });
+    });
+
+    describe('POST /api/files/record-chunk', () => {
+        it('records chunk metadata for resumable uploads', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, { email: 'chunk@example.com', username: 'chunkuser' });
+
+            const initRes = await agent.post('/api/files/init-upload').send({
+                filename: 'chunked.bin',
+                size: 1024,
+                mimeType: 'application/octet-stream',
+            });
+
+            const { fileId, uploadId } = initRes.body;
+
+            const res = await agent.post('/api/files/record-chunk').send({
+                fileId,
+                uploadId,
+                partNumber: 1,
+                etag: '"abc123"',
+                size: 512,
+                fingerprint: 'fp1',
+            });
+
+            expect(res.status).toBe(200);
+
+            const statusRes = await agent.get(`/api/files/${fileId}/upload-status`);
+            expect(statusRes.body.uploadedChunks).toHaveLength(1);
+            expect(statusRes.body.uploadedChunks[0].fingerprint).toBe('fp1');
+        });
+    });
+
+    describe('POST /api/files/:id/abort-upload', () => {
+        it('aborts an in-progress upload', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, { email: 'abort@example.com', username: 'abortuser' });
+
+            const initRes = await agent.post('/api/files/init-upload').send({
+                filename: 'abortme.txt',
+                size: 100,
+                mimeType: 'text/plain',
+            });
+
+            const res = await agent.post(`/api/files/${initRes.body.fileId}/abort-upload`);
+            expect(res.status).toBe(200);
+
+            const file = await File.findById(initRes.body.fileId);
+            expect(file).toBeNull();
         });
     });
 });

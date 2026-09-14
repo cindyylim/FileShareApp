@@ -91,11 +91,11 @@ sequenceDiagram
 ## Testing
 
 ```bash
-cd server && npm test
-cd client && npm test
+cd server && npm test   # 43 tests
+cd client && npm test   # 25 tests
 ```
 
-CI runs both suites on every push via GitHub Actions. Server tests use an in-memory MongoDB instance — no external services required.
+CI runs both suites on every push via GitHub Actions. Server tests use an in-memory MongoDB replica set — no external services required.
 
 ---
 

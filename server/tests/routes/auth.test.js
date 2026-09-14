@@ -90,6 +90,17 @@ describe('auth routes', () => {
             expect(res.body.error).toBe('Invalid email or password');
         });
 
+        it('accepts login with mixed-case email', async () => {
+            const res = await request(app)
+                .post('/api/auth/login')
+                .send({
+                    email: 'LOGIN@example.com',
+                    password: 'password123',
+                });
+
+            expect(res.status).toBe(200);
+        });
+
         it('returns 401 for unknown email', async () => {
             const res = await request(app)
                 .post('/api/auth/login')
