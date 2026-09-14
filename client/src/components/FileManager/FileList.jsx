@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import useAuthStore from '../../stores/authStore';
 import { fileAPI } from '../../services/api';
 import { formatFileSize, formatDate, getFileIcon, getFileExtension } from '../../utils/fileUtils';
@@ -6,23 +6,22 @@ import pako from 'pako';
 import ShareModal from './ShareModal';
 import './FileList.css';
 
-function FileList({ files, onFileDeleted, showOwner = false }) {
+function FileList({ files, onFileDeleted, onStorageUpdate, onNotify, showOwner = false, isOwnerView = false }) {
     const { user, setUser } = useAuthStore();
-    const [deleting, setDeleting] = React.useState(null);
-    const [shareModalOpen, setShareModalOpen] = React.useState(false);
-    const [sharingFile, setSharingFile] = React.useState(null);
+    const [deleting, setDeleting] = useState(null);
+    const [shareModalOpen, setShareModalOpen] = useState(false);
+    const [sharingFile, setSharingFile] = useState(null);
+    const [actionError, setActionError] = useState('');
 
     const handleDownload = async (file) => {
         try {
-            const fileId = file._id;
-            const response = await fileAPI.download(fileId);
+            const response = await fileAPI.download(file._id);
             const { downloadUrl } = response.data;
 
-            // Fetch file from S3
-            const fileResponse = await fetch(downloadUrl);
-            const blob = await fileResponse.blob();
+            const fileResponse = await fetch(downloadUrl, { credentials: 'include' });
+            if (!fileResponse.ok) throw new Error('Download failed');
 
-            // Decompress if needed
+            const blob = await fileResponse.blob();
             let finalBlob = blob;
             if (file.isCompressed) {
                 const arrayBuffer = await blob.arrayBuffer();
@@ -30,7 +29,6 @@ function FileList({ files, onFileDeleted, showOwner = false }) {
                 finalBlob = new Blob([decompressed], { type: file.mimeType });
             }
 
-            // Download the file
             const url = window.URL.createObjectURL(finalBlob);
             const a = document.createElement('a');
             a.href = url;
@@ -39,71 +37,59 @@ function FileList({ files, onFileDeleted, showOwner = false }) {
             a.click();
             window.URL.revokeObjectURL(url);
             document.body.removeChild(a);
+            onNotify?.('Download started', 'success');
         } catch (error) {
             console.error('Download error:', error);
-            alert('Failed to download file');
+            setActionError('Failed to download file');
+            onNotify?.('Failed to download file', 'error');
         }
     };
 
     const handleDelete = async (file) => {
-        if (!confirm(`Are you sure you want to delete "${file.filename}"?`)) {
-            return;
-        }
+        if (!confirm(`Are you sure you want to delete "${file.filename}"?`)) return;
 
-        const fileId = file._id;
-        setDeleting(fileId);
+        setDeleting(file._id);
+        setActionError('');
 
         try {
-            const response = await fileAPI.delete(fileId);
-
-            // Update user storage in store if provided
-            if (response.data.user) {
-                if (user) {
-                    setUser({
-                        ...user,
-                        storageUsed: response.data.user.storageUsed,
-                        storageQuota: response.data.user.storageQuota
-                    });
-                }
+            const response = await fileAPI.delete(file._id);
+            if (response.data.user && user) {
+                setUser({ ...user, ...response.data.user });
+                onStorageUpdate?.(response.data.user);
             }
-
-            if (onFileDeleted) {
-                onFileDeleted(fileId);
-            }
+            onFileDeleted?.(file._id);
+            onNotify?.('File deleted', 'success');
         } catch (error) {
             console.error('Delete error:', error);
-            alert('Failed to delete file');
+            setActionError('Failed to delete file');
+            onNotify?.('Failed to delete file', 'error');
         } finally {
             setDeleting(null);
         }
     };
 
-    const handleShare = async (file) => {
+    const handleShare = (file) => {
         setSharingFile(file);
         setShareModalOpen(true);
     };
 
     const handleShareSubmit = async (email) => {
         if (!sharingFile) return;
+        await fileAPI.share(sharingFile._id, email);
+        onNotify?.(`Shared with ${email}`, 'success');
+    };
 
-        const fileId = sharingFile._id;
+    const handleUnshare = async (file, sharedUserId) => {
         try {
-            await fileAPI.share(fileId, email);
-            alert(`File "${sharingFile.filename}" shared successfully with ${email}`);
+            await fileAPI.unshare(file._id, sharedUserId);
+            onNotify?.('Share revoked', 'success');
         } catch (error) {
-            throw new Error(error.response?.data?.error || 'Failed to share file');
+            onNotify?.(error.response?.data?.error || 'Failed to unshare', 'error');
         }
     };
 
-    const handleCloseShareModal = () => {
-        setShareModalOpen(false);
-        setSharingFile(null);
-    };
-
-    // Check if file can be shared (only owner can share)
-    const canShareFile = (file) => {
-        return user && file.owner && (file.owner._id === user._id || file.owner === user._id);
-    };
+    const canShareFile = (file) =>
+        isOwnerView && user && file.owner && (file.owner._id === user._id || file.owner === user._id);
 
     if (!files || files.length === 0) {
         return (
@@ -117,6 +103,8 @@ function FileList({ files, onFileDeleted, showOwner = false }) {
 
     return (
         <>
+            {actionError && <div className="error-message">{actionError}</div>}
+
             <div className="file-list">
                 {files.map((file) => (
                     <div key={file._id} className="file-item glass-card fade-in">
@@ -139,23 +127,21 @@ function FileList({ files, onFileDeleted, showOwner = false }) {
                                         <span>Shared by {file.owner.username || file.owner.email}</span>
                                     </>
                                 )}
+                                {file.sharedWith?.length > 0 && canShareFile(file) && (
+                                    <>
+                                        <span>•</span>
+                                        <span>{file.sharedWith.length} shared</span>
+                                    </>
+                                )}
                             </div>
                         </div>
 
                         <div className="file-actions">
-                            <button
-                                className="btn-icon"
-                                onClick={() => handleDownload(file)}
-                                title="Download"
-                            >
+                            <button className="btn-icon" onClick={() => handleDownload(file)} title="Download">
                                 ⬇️
                             </button>
                             {canShareFile(file) && (
-                                <button
-                                    className="btn-icon"
-                                    onClick={() => handleShare(file)}
-                                    title="Share"
-                                >
+                                <button className="btn-icon" onClick={() => handleShare(file)} title="Share">
                                     🤝
                                 </button>
                             )}
@@ -176,7 +162,7 @@ function FileList({ files, onFileDeleted, showOwner = false }) {
 
             <ShareModal
                 isOpen={shareModalOpen}
-                onClose={handleCloseShareModal}
+                onClose={() => { setShareModalOpen(false); setSharingFile(null); }}
                 onShare={handleShareSubmit}
                 fileName={sharingFile?.filename || ''}
             />

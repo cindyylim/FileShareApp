@@ -5,7 +5,7 @@ import { chunkFile, calculateFileHash, calculateChunkHash, formatFileSize } from
 import pako from 'pako';
 import './FileUpload.css';
 
-function FileUpload({ onUploadComplete }) {
+function FileUpload({ onUploadComplete, onError }) {
     const { user, setUser } = useAuthStore();
     const [selectedFile, setSelectedFile] = useState(null);
     const [uploading, setUploading] = useState(false);
@@ -13,6 +13,8 @@ function FileUpload({ onUploadComplete }) {
     const [dragActive, setDragActive] = useState(false);
     const [error, setError] = useState('');
     const fileInputRef = useRef(null);
+    const activeUploadRef = useRef(null);
+    const abortRef = useRef(false);
 
     const handleFileSelect = (file) => {
         setSelectedFile(file);
@@ -79,6 +81,7 @@ function FileUpload({ onUploadComplete }) {
         setUploading(true);
         setProgress(0);
         setError('');
+        abortRef.current = false;
 
         try {
             // Step 1: Check if file should be compressed
@@ -105,6 +108,7 @@ function FileUpload({ onUploadComplete }) {
             });
 
             const { fileId, uploadId } = initResponse.data;
+            activeUploadRef.current = fileId;
 
             // Step 5: Chunk the file (compressed or original)
             const chunks = chunkFile(fileToUpload);
@@ -152,6 +156,8 @@ function FileUpload({ onUploadComplete }) {
                 const batch = chunksToUpload.slice(i, i + MAX_CONCURRENT_UPLOADS);
 
                 const batchPromises = batch.map(async ({ partNumber, fingerprint }) => {
+                    if (abortRef.current) throw new Error('Upload cancelled');
+
                     const chunk = chunks[partNumber - 1];
 
                     // Get pre-signed URL
@@ -212,24 +218,14 @@ function FileUpload({ onUploadComplete }) {
                 hash,
             });
 
-            // Update user storage in store if provided
-            if (completeResponse.data.user) {
-                if (user) {
-                    setUser({
-                        ...user,
-                        storageUsed: completeResponse.data.user.storageUsed,
-                        storageQuota: completeResponse.data.user.storageQuota
-                    });
-                }
+            if (completeResponse.data.user && user) {
+                setUser({ ...user, ...completeResponse.data.user });
             }
 
-            // Success!
             setProgress(100);
             setSelectedFile(null);
-
-            if (onUploadComplete) {
-                onUploadComplete();
-            }
+            activeUploadRef.current = null;
+            onUploadComplete?.(completeResponse.data.user);
 
             // Reset file input
             if (fileInputRef.current) {
@@ -237,11 +233,34 @@ function FileUpload({ onUploadComplete }) {
             }
 
         } catch (err) {
+            if (abortRef.current) {
+                setError('Upload cancelled');
+                onError?.('Upload cancelled');
+            } else {
+                const msg = err.response?.data?.error || err.message || 'Upload failed. Please try again.';
+                setError(msg);
+                onError?.(msg);
+            }
             console.error('Upload error:', err);
-            setError(err.response?.data?.error || 'Upload failed. Please try again.');
         } finally {
             setUploading(false);
+            activeUploadRef.current = null;
         }
+    };
+
+    const handleCancelUpload = async () => {
+        abortRef.current = true;
+        if (activeUploadRef.current) {
+            try {
+                await fileAPI.abortUpload(activeUploadRef.current);
+            } catch {
+                // ignore abort errors
+            }
+        }
+        setUploading(false);
+        setSelectedFile(null);
+        setProgress(0);
+        activeUploadRef.current = null;
     };
 
     return (
@@ -299,25 +318,19 @@ function FileUpload({ onUploadComplete }) {
                 </div>
             )}
 
-            {selectedFile && !uploading && (
+            {(selectedFile || uploading) && (
                 <div className="upload-actions">
                     <button
                         className="btn btn-secondary"
-                        onClick={() => {
-                            setSelectedFile(null);
-                            if (fileInputRef.current) {
-                                fileInputRef.current.value = '';
-                            }
-                        }}
+                        onClick={() => uploading ? handleCancelUpload() : (setSelectedFile(null), fileInputRef.current && (fileInputRef.current.value = ''))}
                     >
-                        Cancel
+                        {uploading ? 'Cancel Upload' : 'Cancel'}
                     </button>
-                    <button
-                        className="btn btn-primary"
-                        onClick={uploadFile}
-                    >
-                        Upload
-                    </button>
+                    {!uploading && (
+                        <button className="btn btn-primary" onClick={uploadFile}>
+                            Upload
+                        </button>
+                    )}
                 </div>
             )}
         </div>

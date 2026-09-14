@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import './ShareModal.css';
 
 function ShareModal({ isOpen, onClose, onShare, fileName }) {
+    const modalRef = useRef(null);
     const [email, setEmail] = useState('');
     const [sharing, setSharing] = useState(false);
     const [error, setError] = useState('');
@@ -43,13 +44,35 @@ function ShareModal({ isOpen, onClose, onShare, fileName }) {
         }
     };
 
+    useEffect(() => {
+        if (!isOpen) return;
+        const onKeyDown = (e) => {
+            if (e.key === 'Escape' && !sharing) {
+                setEmail('');
+                setError('');
+                onClose();
+            }
+        };
+        document.addEventListener('keydown', onKeyDown);
+        modalRef.current?.focus();
+        return () => document.removeEventListener('keydown', onKeyDown);
+    }, [isOpen, sharing, onClose]);
+
     if (!isOpen) return null;
 
     return (
-        <div className="modal-overlay">
-            <div className="modal-content">
+        <div className="modal-overlay" onClick={handleClose} role="presentation">
+            <div
+                className="modal-content"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="share-modal-title"
+                ref={modalRef}
+                tabIndex={-1}
+                onClick={(e) => e.stopPropagation()}
+            >
                 <div className="modal-header">
-                    <h3>Share File</h3>
+                    <h3 id="share-modal-title">Share File</h3>
                     <button 
                         className="modal-close" 
                         onClick={handleClose}
