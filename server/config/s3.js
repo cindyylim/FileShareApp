@@ -1,8 +1,6 @@
 import { S3Client } from '@aws-sdk/client-s3';
 
-export const USE_LOCAL_STORAGE =
-    process.env.USE_LOCAL_STORAGE === 'true' ||
-    (!process.env.AWS_ACCESS_KEY_ID && process.env.USE_LOCAL_STORAGE !== 'false');
+export const USE_LOCAL_STORAGE = process.env.USE_LOCAL_STORAGE === 'true';
 export const LOCAL_STORAGE_DIR = process.env.LOCAL_STORAGE_DIR || './uploads';
 
 /**

@@ -9,7 +9,7 @@ import {
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { UploadPartCommand } from '@aws-sdk/client-s3';
-import { s3Client, S3_CONFIG, USE_LOCAL_STORAGE, LOCAL_STORAGE_DIR } from '../config/s3.js';
+import { s3Client, S3_CONFIG, LOCAL_STORAGE_DIR } from '../config/s3.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { validateObjectId } from '../middleware/validateObjectId.js';
 import { requireFileDownloadAccess } from '../middleware/fileAccess.js';
@@ -22,6 +22,9 @@ import { incrementStorageUsed, storagePayload } from '../utils/storage.js';
 import { saveChunk, assembleFileFromChunks, deleteLocalFile } from '../services/localStorageService.js';
 
 const router = express.Router();
+
+const isLocalStorage = () => process.env.USE_LOCAL_STORAGE === 'true';
+const isS3Storage = () => !isLocalStorage();
 
 const upsertChunk = (chunks, chunkData) => {
     const existing = chunks.find((c) => c.partNumber === chunkData.partNumber);
@@ -155,10 +158,9 @@ router.post('/init-upload', authenticateToken, async (req, res) => {
         const s3Key = `users/${req.user._id}/${fileId}/${safeFilename}`;
         let uploadId;
 
-        if (USE_LOCAL_STORAGE) {
+        if (isLocalStorage()) {
             uploadId = fileId.toString();
-        } else {
-            // Create multipart upload in S3
+        } else if (isS3Storage()) {
             const createCommand = new CreateMultipartUploadCommand({
                 Bucket: S3_CONFIG.BUCKET_NAME,
                 Key: s3Key,
@@ -197,6 +199,7 @@ router.post('/init-upload', authenticateToken, async (req, res) => {
             uploadId,
             s3Key,
             chunkSize: S3_CONFIG.CHUNK_SIZE,
+            useLocalStorage: isLocalStorage(),
             message: 'Upload initialized successfully',
         });
     } catch (error) {
@@ -230,15 +233,19 @@ router.post('/presigned-url', authenticateToken, async (req, res) => {
             return res.status(404).json({ error: 'File not found or unauthorized' });
         }
 
-        if (USE_LOCAL_STORAGE) {
+        if (isLocalStorage()) {
             const presignedUrl = `/api/files/local-upload?fileId=${fileId}&uploadId=${uploadId}&partNumber=${partNumber}`;
             return res.json({
                 presignedUrl,
                 partNumber,
+                useLocalStorage: true,
             });
         }
 
-        // Generate pre-signed URL for this part
+        if (!isS3Storage()) {
+            return res.status(500).json({ error: 'No storage backend configured' });
+        }
+
         const command = new UploadPartCommand({
             Bucket: S3_CONFIG.BUCKET_NAME,
             Key: file.s3Key,
@@ -264,7 +271,11 @@ router.post('/presigned-url', authenticateToken, async (req, res) => {
  * PUT /api/files/local-upload
  * Local chunk upload handler for USE_LOCAL_STORAGE mode
  */
-router.put('/local-upload', authenticateToken, validateObjectId('fileId'),express.raw({ type: '*/*', limit: '100mb' }), async (req, res) => {
+router.put('/local-upload', authenticateToken, express.raw({ type: '*/*', limit: '100mb' }), async (req, res) => {
+    if (!isLocalStorage()) {
+        return res.status(404).json({ error: 'Local storage is not enabled' });
+    }
+
     try {
         const { fileId, partNumber, uploadId } = req.query;
 
@@ -307,6 +318,10 @@ router.put('/local-upload', authenticateToken, validateObjectId('fileId'),expres
  * Persist chunk metadata after a successful S3 upload (enables resume)
  */
 router.post('/record-chunk', authenticateToken, async (req, res) => {
+    if (!isS3Storage()) {
+        return res.status(400).json({ error: 'Chunk recording is only used for S3 uploads' });
+    }
+
     try {
         const { fileId, uploadId, partNumber, etag, size, fingerprint } = req.body;
 
@@ -375,10 +390,9 @@ router.post('/complete-upload', authenticateToken, async (req, res) => {
             return res.status(400).json({ error: 'Uploaded parts exceed declared file size' });
         }
 
-        if (USE_LOCAL_STORAGE) {
+        if (isLocalStorage()) {
             await assembleFileFromChunks(fileId, file.s3Key, parts);
-        } else {
-            // Complete multipart upload in S3
+        } else if (isS3Storage()) {
             const completeCommand = new CompleteMultipartUploadCommand({
                 Bucket: S3_CONFIG.BUCKET_NAME,
                 Key: file.s3Key,
@@ -392,6 +406,8 @@ router.post('/complete-upload', authenticateToken, async (req, res) => {
             });
 
             await s3Client.send(completeCommand);
+        } else {
+            return res.status(500).json({ error: 'No storage backend configured' });
         }
 
         // Update file document
@@ -424,8 +440,7 @@ router.post('/complete-upload', authenticateToken, async (req, res) => {
     } catch (error) {
         console.error('Complete upload error:', error);
 
-        if (!USE_LOCAL_STORAGE && file) {
-            // Try to abort the multipart upload on error
+        if (isS3Storage() && file) {
             try {
                 const abortCommand = new AbortMultipartUploadCommand({
                     Bucket: S3_CONFIG.BUCKET_NAME,
@@ -522,16 +537,20 @@ router.get('/:id/download', authenticateToken, validateObjectId('id'), async (re
             return res.status(404).json({ error: 'File not found or not ready' });
         }
 
-        if (USE_LOCAL_STORAGE) {
+        if (isLocalStorage()) {
             const downloadUrl = `/api/files/local-download/${file._id}`;
             return res.json({
                 downloadUrl,
                 filename: file.originalName,
                 expiresIn: S3_CONFIG.PRESIGNED_URL_EXPIRY,
+                useLocalStorage: true,
             });
         }
 
-        // Generate pre-signed URL for download
+        if (!isS3Storage()) {
+            return res.status(500).json({ error: 'No storage backend configured' });
+        }
+
         const command = new GetObjectCommand({
             Bucket: S3_CONFIG.BUCKET_NAME,
             Key: file.s3Key,
@@ -558,6 +577,10 @@ router.get('/:id/download', authenticateToken, validateObjectId('id'), async (re
  * Direct file download endpoint for USE_LOCAL_STORAGE mode
  */
 router.get('/local-download/:id', authenticateToken, validateObjectId('id'), requireFileDownloadAccess, async (req, res) => {
+    if (!isLocalStorage()) {
+        return res.status(404).json({ error: 'Local storage is not enabled' });
+    }
+
     try {
         const file = req.fileRecord;
         const filePath = path.join(LOCAL_STORAGE_DIR, file.s3Key);
@@ -588,13 +611,13 @@ router.delete('/:id', authenticateToken, validateObjectId('id'), async (req, res
             return res.status(404).json({ error: 'File not found' });
         }
 
-        if (USE_LOCAL_STORAGE) {
+        if (isLocalStorage()) {
             try {
                 await deleteLocalFile(file.s3Key);
             } catch (unlinkErr) {
                 console.warn('Could not delete local file:', unlinkErr.message);
             }
-        } else if (file.uploadStatus === 'completed') {
+        } else if (isS3Storage() && file.uploadStatus === 'completed') {
             const deleteCommand = new DeleteObjectCommand({
                 Bucket: S3_CONFIG.BUCKET_NAME,
                 Key: file.s3Key,
@@ -639,7 +662,7 @@ router.post('/:id/abort-upload', authenticateToken, validateObjectId('id'), asyn
             return res.status(404).json({ error: 'Active upload not found' });
         }
 
-        if (!USE_LOCAL_STORAGE && file.uploadId) {
+        if (isS3Storage() && file.uploadId) {
             const abortCommand = new AbortMultipartUploadCommand({
                 Bucket: S3_CONFIG.BUCKET_NAME,
                 Key: file.s3Key,

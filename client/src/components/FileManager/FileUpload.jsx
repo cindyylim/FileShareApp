@@ -1,6 +1,6 @@
 import React, { useState, useRef } from 'react';
 import useAuthStore from '../../stores/authStore';
-import { fileAPI, uploadToS3 } from '../../services/api';
+import { fileAPI, uploadChunk } from '../../services/api';
 import { chunkFile, calculateFileHash, calculateChunkHash, formatFileSize } from '../../utils/fileUtils';
 import pako from 'pako';
 import './FileUpload.css';
@@ -107,7 +107,7 @@ function FileUpload({ onUploadComplete, onError }) {
                 originalSize: shouldCompress ? originalSize : undefined,
             });
 
-            const { fileId, uploadId } = initResponse.data;
+            const { fileId, uploadId, useLocalStorage } = initResponse.data;
             activeUploadRef.current = fileId;
 
             // Step 5: Chunk the file (compressed or original)
@@ -169,10 +169,9 @@ function FileUpload({ onUploadComplete, onError }) {
 
                     const { presignedUrl } = urlResponse.data;
 
-                    // Upload to S3
-                    const etag = await uploadToS3(presignedUrl, chunk, fingerprint);
+                    const etag = await uploadChunk(presignedUrl, chunk, fingerprint, useLocalStorage);
 
-                    if (!presignedUrl.startsWith('/')) {
+                    if (!useLocalStorage) {
                         await fileAPI.recordChunk({
                             fileId,
                             uploadId,

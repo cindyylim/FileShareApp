@@ -212,7 +212,7 @@ describe('files routes', () => {
     });
 
     describe('POST /api/files/record-chunk', () => {
-        it('records chunk metadata for resumable uploads', async () => {
+        it('rejects chunk recording when using local storage', async () => {
             const agent = request.agent(app);
             await registerAndLogin(agent, { email: 'chunk@example.com', username: 'chunkuser' });
 
@@ -233,11 +233,8 @@ describe('files routes', () => {
                 fingerprint: 'fp1',
             });
 
-            expect(res.status).toBe(200);
-
-            const statusRes = await agent.get(`/api/files/${fileId}/upload-status`);
-            expect(statusRes.body.uploadedChunks).toHaveLength(1);
-            expect(statusRes.body.uploadedChunks[0].fingerprint).toBe('fp1');
+            expect(res.status).toBe(400);
+            expect(res.body.error).toContain('S3');
         });
     });
 

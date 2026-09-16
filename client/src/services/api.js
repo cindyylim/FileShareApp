@@ -73,30 +73,49 @@ export const fileAPI = {
     unshare: (id, userId) => api.delete(`/files/${id}/unshare/${userId}`),
 };
 
-/**
- * Direct upload to S3 using pre-signed URL
- */
-export const uploadToS3 = async (presignedUrl, chunk, fingerprint) => {
-    const isLocalUpload = presignedUrl.startsWith('/');
+const uploadChunkLocally = async (uploadUrl, chunk, fingerprint) => {
     const headers = { 'Content-Type': 'application/octet-stream' };
-    if (isLocalUpload && fingerprint) {
+    if (fingerprint) {
         headers['X-Chunk-Fingerprint'] = fingerprint;
     }
 
+    const response = await fetch(uploadUrl, {
+        method: 'PUT',
+        body: chunk,
+        credentials: 'include',
+        headers,
+    });
+
+    if (!response.ok) {
+        throw new Error('Failed to upload chunk locally');
+    }
+
+    return response.headers.get('ETag');
+};
+
+const uploadChunkToS3 = async (presignedUrl, chunk) => {
     const response = await fetch(presignedUrl, {
         method: 'PUT',
         body: chunk,
-        credentials: isLocalUpload ? 'include' : 'omit',
-        headers,
+        credentials: 'omit',
+        headers: { 'Content-Type': 'application/octet-stream' },
     });
 
     if (!response.ok) {
         throw new Error('Failed to upload chunk to S3');
     }
 
-    // Get ETag from response headers
-    const etag = response.headers.get('ETag');
-    return etag;
+    return response.headers.get('ETag');
+};
+
+/**
+ * Upload a file chunk to local storage or S3 based on server config.
+ */
+export const uploadChunk = async (uploadUrl, chunk, fingerprint, useLocalStorage) => {
+    if (useLocalStorage) {
+        return uploadChunkLocally(uploadUrl, chunk, fingerprint);
+    }
+    return uploadChunkToS3(uploadUrl, chunk);
 };
 
 export default api;
