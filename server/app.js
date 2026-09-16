@@ -5,8 +5,10 @@ import mongoose from 'mongoose';
 import authRoutes from './routes/auth.js';
 import fileRoutes from './routes/files.js';
 import { authRateLimit } from './middleware/rateLimit.js';
-import { USE_LOCAL_STORAGE } from './config/s3.js';
 
+const useLocalStorage = () =>  {
+    return process.env.USE_LOCAL_STORAGE === 'true';
+}
 /**
  * Create and configure the Express application (without Socket.io / CDC).
  * Exported separately so integration tests can use supertest.
@@ -32,7 +34,7 @@ export const createApp = () => {
             timestamp: new Date().toISOString(),
             checks: {
                 mongodb: mongoOk ? 'connected' : 'disconnected',
-                storage: USE_LOCAL_STORAGE ? 'local' : 's3',
+                storage: useLocalStorage() ? 'local' : 's3',
             },
         });
     });
