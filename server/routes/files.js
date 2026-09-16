@@ -264,16 +264,12 @@ router.post('/presigned-url', authenticateToken, async (req, res) => {
  * PUT /api/files/local-upload
  * Local chunk upload handler for USE_LOCAL_STORAGE mode
  */
-router.put('/local-upload', authenticateToken, express.raw({ type: '*/*', limit: '100mb' }), async (req, res) => {
+router.put('/local-upload', authenticateToken, validateObjectId('fileId'),express.raw({ type: '*/*', limit: '100mb' }), async (req, res) => {
     try {
         const { fileId, partNumber, uploadId } = req.query;
 
         if (!fileId || !partNumber || !uploadId) {
             return res.status(400).json({ error: 'Missing fileId, partNumber, or uploadId query parameters' });
-        }
-
-        if (!mongoose.Types.ObjectId.isValid(fileId)) {
-            return res.status(400).json({ error: 'Invalid fileId' });
         }
 
         const file = await File.findOne({
