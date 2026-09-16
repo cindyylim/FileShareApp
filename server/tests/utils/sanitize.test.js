@@ -10,7 +10,10 @@ describe('sanitize utilities', () => {
 
         it('rejects invalid names', () => {
             expect(() => sanitizeFilename('..')).toThrow('Invalid filename');
+            expect(() => sanitizeFilename('.')).toThrow('Invalid filename');
             expect(() => sanitizeFilename('')).toThrow('Invalid filename');
+            expect(() => sanitizeFilename(null)).toThrow('Invalid filename');
+            expect(() => sanitizeFilename(123)).toThrow('Invalid filename');
         });
     });
 
