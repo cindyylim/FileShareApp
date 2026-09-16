@@ -57,7 +57,7 @@ describe('User model', () => {
             storageQuota: 5000,
         });
 
-        expect(user.hasStorageSpace(2000)).toBe(false);
+        expect(user.hasStorageSpace(1001)).toBe(false);
     });
 
     it('rejects duplicate email', async () => {
@@ -72,6 +72,23 @@ describe('User model', () => {
                 username: 'user2',
                 email: 'dup@example.com',
                 password: 'password123',
+            })
+        ).rejects.toThrow();
+    });
+
+
+    it('rejects duplicate username', async () => {
+        await User.create({
+            username: 'user1',
+            email: 'user1@example.com',
+            password: 'password123',
+        });
+
+        await expect(
+            User.create({
+                username: 'user1',
+                email: 'user2@example.com',
+                password: 'password456',
             })
         ).rejects.toThrow();
     });
