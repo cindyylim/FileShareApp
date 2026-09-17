@@ -8,6 +8,7 @@ import {
     saveChunk,
     assembleFileFromChunks,
     deleteLocalFile,
+    abortLocalUpload,
 } from '../../services/localStorageService.js';
 
 const fileId = '507f1f77bcf86cd799439011';
@@ -90,6 +91,25 @@ describe('localStorageService', () => {
 
         it('does nothing when the file does not exist', async () => {
             await expect(deleteLocalFile('users/missing/file.txt')).resolves.toBeUndefined();
+        });
+    });
+
+    describe('abortLocalUpload', () => {
+        it('removes chunk directory and partial assembled file', async () => {
+            await saveChunk(fileId, 1, Buffer.from('partial'));
+            await saveChunk(fileId, 2, Buffer.from(' data'));
+
+            const chunkDir = path.join(LOCAL_STORAGE_DIR, 'chunks', fileId);
+            expect(fs.existsSync(chunkDir)).toBe(true);
+
+            await abortLocalUpload(fileId, s3Key);
+
+            expect(fs.existsSync(chunkDir)).toBe(false);
+            expect(fs.existsSync(path.join(LOCAL_STORAGE_DIR, s3Key))).toBe(false);
+        });
+
+        it('succeeds when no artifacts exist', async () => {
+            await expect(abortLocalUpload(fileId, s3Key)).resolves.toBeUndefined();
         });
     });
 });

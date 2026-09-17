@@ -54,3 +54,15 @@ export const deleteLocalFile = async (s3Key) => {
     const folder = path.dirname(filePath);
     await fs.promises.rmdir(folder).catch(() => {});
 };
+
+/**
+ * Clean up partial local upload artifacts (chunks and any assembled file).
+ */
+export const abortLocalUpload = async (fileId, s3Key) => {
+    const chunkDir = path.join(LOCAL_STORAGE_DIR, 'chunks', fileId.toString());
+    if (fs.existsSync(chunkDir)) {
+        await fs.promises.rm(chunkDir, { recursive: true, force: true });
+    }
+
+    await deleteLocalFile(s3Key);
+};

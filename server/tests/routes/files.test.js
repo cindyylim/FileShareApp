@@ -239,7 +239,7 @@ describe('files routes', () => {
     });
 
     describe('POST /api/files/:id/abort-upload', () => {
-        it('aborts an in-progress upload', async () => {
+        it('aborts an in-progress upload and cleans up local chunks', async () => {
             const agent = request.agent(app);
             await registerAndLogin(agent, { email: 'abort@example.com', username: 'abortuser' });
 
@@ -249,11 +249,22 @@ describe('files routes', () => {
                 mimeType: 'text/plain',
             });
 
-            const res = await agent.post(`/api/files/${initRes.body.fileId}/abort-upload`);
-            expect(res.status).toBe(200);
+            const { fileId, uploadId } = initRes.body;
 
-            const file = await File.findById(initRes.body.fileId);
+            await agent
+                .put(`/api/files/local-upload?fileId=${fileId}&uploadId=${uploadId}&partNumber=1`)
+                .set('Content-Type', 'application/octet-stream')
+                .send(Buffer.from('partial data'));
+
+            const res = await agent.post(`/api/files/${fileId}/abort-upload`);
+            expect(res.status).toBe(200);
+            expect(res.body.message).toBe('Upload aborted');
+
+            const file = await File.findById(fileId);
             expect(file).toBeNull();
+
+            const chunkDir = path.join(process.env.LOCAL_STORAGE_DIR || './test-uploads', 'chunks', fileId);
+            expect(fs.existsSync(chunkDir)).toBe(false);
         });
     });
 });

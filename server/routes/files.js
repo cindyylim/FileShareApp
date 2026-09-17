@@ -19,7 +19,7 @@ import User from '../models/User.js';
 import { GetObjectCommand } from '@aws-sdk/client-s3';
 import mongoose from 'mongoose';
 import { incrementStorageUsed, storagePayload } from '../utils/storage.js';
-import { saveChunk, assembleFileFromChunks, deleteLocalFile } from '../services/localStorageService.js';
+import { saveChunk, assembleFileFromChunks, deleteLocalFile, abortLocalUpload } from '../services/localStorageService.js';
 
 const router = express.Router();
 
@@ -662,7 +662,9 @@ router.post('/:id/abort-upload', authenticateToken, validateObjectId('id'), asyn
             return res.status(404).json({ error: 'Active upload not found' });
         }
 
-        if (isS3Storage() && file.uploadId) {
+        if (isLocalStorage()) {
+            await abortLocalUpload(file._id, file.s3Key);
+        } else if (isS3Storage() && file.uploadId) {
             const abortCommand = new AbortMultipartUploadCommand({
                 Bucket: S3_CONFIG.BUCKET_NAME,
                 Key: file.s3Key,
