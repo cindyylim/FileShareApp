@@ -466,7 +466,7 @@ router.post('/complete-upload', authenticateToken, async (req, res) => {
 
         if (isLocalStorage()) {
             await assembleFileFromChunks(fileId, file.s3Key, parts);
-        } else if (isS3Storage()) {
+        } else {
             const completeCommand = new CompleteMultipartUploadCommand({
                 Bucket: S3_CONFIG.BUCKET_NAME,
                 Key: file.s3Key,
@@ -480,14 +480,7 @@ router.post('/complete-upload', authenticateToken, async (req, res) => {
             });
 
             await s3Client.send(completeCommand);
-        } else {
-            await File.findOneAndUpdate(
-                { _id: file._id, uploadStatus: 'completing' },
-                { $set: { uploadStatus: 'failed' } }
-            );
-            return res.status(500).json({ error: 'No storage backend configured' });
-        }
-
+        } 
         const session = await mongoose.startSession();
         session.startTransaction();
 

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import fs from 'fs';
 import path from 'path';
@@ -1016,7 +1016,7 @@ describe('files routes', () => {
             });
 
             expect(res.status).toBe(400);
-            expect(res.body.error).toContain('S3');
+            expect(res.body.error).toBe('Chunk recording is only used for S3 uploads');
         });
     });
 
@@ -1046,6 +1046,291 @@ describe('files routes', () => {
             expect(res.status).toBe(200);
             expect(res.body.message).toBe('Upload already completed');
             expect(res.body.file.id).toBe(file._id.toString());
+        });
+
+        it('completes a local upload and assembles the file', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'complete-success@example.com',
+                username: 'completesuccess',
+            });
+
+            const payload = Buffer.from('complete-me');
+            const initRes = await agent.post('/api/files/init-upload').send({
+                filename: 'assembled.txt',
+                size: payload.length,
+                originalSize: payload.length,
+                mimeType: 'text/plain',
+            });
+            const { fileId, uploadId, s3Key } = initRes.body;
+
+            const uploadRes = await agent
+                .put('/api/files/local-upload')
+                .query({ fileId, uploadId, partNumber: 1 })
+                .set('Content-Type', 'application/octet-stream')
+                .send(payload);
+            const etag = uploadRes.headers.etag;
+
+            const res = await agent.post('/api/files/complete-upload').send({
+                fileId,
+                uploadId,
+                hash: 'file-hash',
+                parts: [{ partNumber: 1, etag, size: payload.length, fingerprint: 'fp1' }],
+            });
+
+            expect(res.status).toBe(200);
+            expect(res.body.message).toBe('Upload completed successfully');
+            expect(res.body.file).toMatchObject({
+                id: fileId,
+                filename: 'assembled.txt',
+                size: payload.length,
+                mimeType: 'text/plain',
+            });
+            expect(res.body.user.storageUsed).toBe(payload.length);
+
+            const file = await File.findById(fileId);
+            expect(file.uploadStatus).toBe('completed');
+            expect(file.uploadId).toBeUndefined();
+            expect(file.hash).toBe('file-hash');
+            expect(file.chunks).toHaveLength(1);
+            expect(file.chunks[0].partNumber).toBe(1);
+
+            const assembledPath = path.join(LOCAL_STORAGE_DIR, s3Key);
+            expect(await fs.promises.readFile(assembledPath)).toEqual(payload);
+            expect(fs.existsSync(path.join(LOCAL_STORAGE_DIR, 'chunks', fileId))).toBe(false);
+
+            const user = await User.findOne({ email: 'complete-success@example.com' });
+            expect(user.storageUsed).toBe(payload.length);
+            expect(user.pendingStorage).toBe(0);
+        });
+
+        it('returns 400 when required fields are missing', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'complete-missing@example.com',
+                username: 'completemissing',
+            });
+
+            const missingParts = await agent.post('/api/files/complete-upload').send({
+                fileId: 'abc',
+                uploadId: 'abc',
+            });
+            expect(missingParts.status).toBe(400);
+            expect(missingParts.body.error).toBe('Please provide fileId, uploadId, and parts array');
+
+            const partsNotArray = await agent.post('/api/files/complete-upload').send({
+                fileId: 'abc',
+                uploadId: 'abc',
+                parts: { partNumber: 1 },
+            });
+            expect(partsNotArray.status).toBe(400);
+            expect(partsNotArray.body.error).toBe('Please provide fileId, uploadId, and parts array');
+
+            const missingFileId = await agent.post('/api/files/complete-upload').send({
+                uploadId: 'abc',
+                parts: [{ partNumber: 1, etag: '"abc"', size: 1 }],
+            });
+            expect(missingFileId.status).toBe(400);
+            expect(missingFileId.body.error).toBe('Please provide fileId, uploadId, and parts array');
+
+            const missingUploadId = await agent.post('/api/files/complete-upload').send({
+                fileId: 'abc',
+                parts: [{ partNumber: 1, etag: '"abc"', size: 1 }],
+            });
+            expect(missingUploadId.status).toBe(400);
+            expect(missingUploadId.body.error).toBe('Please provide fileId, uploadId, and parts array');
+        });
+
+        it('returns 400 when uploaded parts exceed declared file size', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'complete-exceed@example.com',
+                username: 'completeexceed',
+            });
+
+            const initRes = await agent.post('/api/files/init-upload').send({
+                filename: 'small.txt',
+                size: 10,
+                originalSize: 10,
+                mimeType: 'text/plain',
+            });
+            const { fileId, uploadId } = initRes.body;
+
+            const res = await agent.post('/api/files/complete-upload').send({
+                fileId,
+                uploadId,
+                parts: [{ partNumber: 1, etag: '"abc"', size: 11 }],
+            });
+
+            expect(res.status).toBe(400);
+            expect(res.body.error).toBe('Uploaded parts exceed declared file size');
+
+            const file = await File.findById(fileId);
+            expect(file.uploadStatus).toBe('uploading');
+        });
+
+        it('returns 404 when the upload is not an active owned upload', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'complete-404@example.com',
+                username: 'complete404',
+            });
+
+            const ownerId = '66e6e6e6e6e6e6e6e6e6e6e6';
+            const file = await File.create({
+                filename: 'other.txt',
+                originalName: 'other.txt',
+                size: 10,
+                mimeType: 'text/plain',
+                owner: ownerId,
+                s3Bucket: 'local-bucket',
+                s3Key: `users/${ownerId}/complete/other.txt`,
+                uploadId: 'upload',
+                uploadStatus: 'uploading',
+            });
+
+            const res = await agent.post('/api/files/complete-upload').send({
+                fileId: file._id,
+                uploadId: 'upload',
+                parts: [{ partNumber: 1, etag: '"abc"', size: 10 }],
+            });
+
+            expect(res.status).toBe(404);
+            expect(res.body.error).toBe('File not found or unauthorized');
+        });
+
+        it('returns 500 when a local chunk is missing', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'complete-missing-chunk@example.com',
+                username: 'completemissingchunk',
+            });
+
+            const initRes = await agent.post('/api/files/init-upload').send({
+                filename: 'missing-part.txt',
+                size: 12,
+                originalSize: 12,
+                mimeType: 'text/plain',
+            });
+            const { fileId, uploadId } = initRes.body;
+
+            const res = await agent.post('/api/files/complete-upload').send({
+                fileId,
+                uploadId,
+                parts: [{ partNumber: 1, etag: '"abc"', size: 12 }],
+            });
+
+            expect(res.status).toBe(500);
+            expect(res.body.error).toBe('Server error while completing upload');
+
+            const file = await File.findById(fileId);
+            expect(file.s3Key).toBeDefined();
+            expect(fs.existsSync(path.join(LOCAL_STORAGE_DIR, file.s3Key))).toBe(false);
+        });
+
+        it('returns 409 when the file is no longer in completing state', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'complete-conflict@example.com',
+                username: 'completeconflict',
+            });
+
+            const payload = Buffer.from('conflict');
+            const initRes = await agent.post('/api/files/init-upload').send({
+                filename: 'conflict.txt',
+                size: payload.length,
+                originalSize: payload.length,
+                mimeType: 'text/plain',
+            });
+            const { fileId, uploadId } = initRes.body;
+
+            const uploadRes = await agent
+                .put('/api/files/local-upload')
+                .query({ fileId, uploadId, partNumber: 1 })
+                .set('Content-Type', 'application/octet-stream')
+                .send(payload);
+
+            const originalFindOneAndUpdate = File.findOneAndUpdate.bind(File);
+            const spy = vi.spyOn(File, 'findOneAndUpdate').mockImplementation((filter, update, options) => {
+                if (filter?.uploadStatus === 'completing' && update?.$set?.uploadStatus === 'completed') {
+                    return Promise.resolve(null);
+                }
+                return originalFindOneAndUpdate(filter, update, options);
+            });
+
+            try {
+                const res = await agent.post('/api/files/complete-upload').send({
+                    fileId,
+                    uploadId,
+                    parts: [{ partNumber: 1, etag: uploadRes.headers.etag, size: payload.length }],
+                });
+
+                expect(res.status).toBe(409);
+                expect(res.body.error).toBe('Upload state conflict');
+
+                const file = await File.findById(fileId);
+                expect(file.uploadStatus).toBe('completing');
+                const user = await User.findOne({ email: 'complete-conflict@example.com' });
+                expect(user.storageUsed).toBe(0);
+                expect(user.pendingStorage).toBe(payload.length);
+            } finally {
+                spy.mockRestore();
+            }
+        });
+
+        it('deletes the assembled local file when completion throws', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'complete-cleanup@example.com',
+                username: 'completecleanup',
+            });
+
+            const payload = Buffer.from('cleanup-me');
+            const initRes = await agent.post('/api/files/init-upload').send({
+                filename: 'cleanup.txt',
+                size: payload.length,
+                originalSize: payload.length,
+                mimeType: 'text/plain',
+            });
+            const { fileId, uploadId, s3Key } = initRes.body;
+
+            const uploadRes = await agent
+                .put('/api/files/local-upload')
+                .query({ fileId, uploadId, partNumber: 1 })
+                .set('Content-Type', 'application/octet-stream')
+                .send(payload);
+
+            const originalFindOneAndUpdate = File.findOneAndUpdate.bind(File);
+            const spy = vi.spyOn(File, 'findOneAndUpdate').mockImplementation((filter, update, options) => {
+                if (filter?.uploadStatus === 'completing' && update?.$set?.uploadStatus === 'completed') {
+                    return Promise.reject(new Error('transaction failed'));
+                }
+                return originalFindOneAndUpdate(filter, update, options);
+            });
+
+            try {
+                const res = await agent.post('/api/files/complete-upload').send({
+                    fileId,
+                    uploadId,
+                    parts: [{ partNumber: 1, etag: uploadRes.headers.etag, size: payload.length }],
+                });
+
+                expect(res.status).toBe(500);
+                expect(res.body.error).toBe('Server error while completing upload');
+                expect(fs.existsSync(path.join(LOCAL_STORAGE_DIR, s3Key))).toBe(false);
+            } finally {
+                spy.mockRestore();
+            }
+        });
+    
+        it('returns 401 when not authenticated', async () => {
+            const res = await request(app).post('/api/files/complete-upload').send({
+                fileId: 'abc',
+                uploadId: 'abc',
+                parts: [{ partNumber: 1, etag: '"abc"', size: 1 }],
+            });
+
+            expect(res.status).toBe(401);
         });
     });
 
