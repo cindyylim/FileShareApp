@@ -171,15 +171,27 @@ router.post('/init-upload', authenticateToken, async (req, res) => {
     try {
         const { filename, size, mimeType, path = '/', isCompressed = false, originalSize } = req.body;
 
-        if (!filename || !size || !mimeType) {
+        if (!filename || !size || !mimeType || !originalSize) {
             return res.status(400).json({
-                error: 'Please provide filename, size, and mimeType'
+                error: 'Please provide filename, size, originalSize, and mimeType'
             });
         }
 
-        if (size <= 0 || size > S3_CONFIG.MAX_FILE_SIZE) {
+        if (isNaN(size) || size <= 0 || size > S3_CONFIG.MAX_FILE_SIZE) {
             return res.status(400).json({
-                error: `File size must be between 1 byte and ${S3_CONFIG.MAX_FILE_SIZE} bytes`
+                error: `File size must be a number between 1 byte and ${S3_CONFIG.MAX_FILE_SIZE} bytes`
+            });
+        }
+
+        if (isNaN(originalSize) || originalSize <= 0 || originalSize > S3_CONFIG.MAX_FILE_SIZE) {
+            return res.status(400).json({
+                error: `Original size must be a number between 1 byte and ${S3_CONFIG.MAX_FILE_SIZE} bytes`
+            });
+        }
+
+        if (size > originalSize) {
+            return res.status(400).json({
+                error: 'File size cannot be greater than original size'
             });
         }
 
@@ -237,7 +249,7 @@ router.post('/init-upload', authenticateToken, async (req, res) => {
             });
 
             await file.save();
-        } catch (initError) {
+        } catch (error) {
             await releaseStorageReservation(req.user._id, size);
             if (isS3Storage() && uploadId) {
                 try {
@@ -250,7 +262,7 @@ router.post('/init-upload', authenticateToken, async (req, res) => {
                     console.error('Init upload S3 abort error:', abortError);
                 }
             }
-            throw initError;
+            throw error;
         }
 
         res.status(201).json({
@@ -295,11 +307,6 @@ router.post('/presigned-url', authenticateToken, async (req, res) => {
                 useLocalStorage: true,
             });
         }
-
-        if (!isS3Storage()) {
-            return res.status(500).json({ error: 'No storage backend configured' });
-        }
-
         const command = new UploadPartCommand({
             Bucket: S3_CONFIG.BUCKET_NAME,
             Key: file.s3Key,
