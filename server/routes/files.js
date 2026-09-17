@@ -580,29 +580,6 @@ router.get('/:id/upload-status', authenticateToken, validateObjectId('id'), asyn
 });
 
 /**
- * GET /api/files/:id
- * Get file metadata
- */
-router.get('/:id', authenticateToken, validateObjectId('id'), async (req, res) => {
-    try {
-        const file = await File.findOne({
-            _id: req.params.id,
-            owner: req.user._id,
-            isDeleted: false,
-        });
-
-        if (!file) {
-            return res.status(404).json({ error: 'File not found' });
-        }
-
-        res.json({ file });
-    } catch (error) {
-        console.error('Get file error:', error);
-        res.status(500).json({ error: 'Server error while fetching file' });
-    }
-});
-
-/**
  * GET /api/files/:id/download
  * Get pre-signed URL for downloading file
  */
@@ -632,13 +609,9 @@ router.get('/:id/download', authenticateToken, validateObjectId('id'), async (re
             return res.json({
                 downloadUrl,
                 filename: file.originalName,
-                expiresIn: S3_CONFIG.PRESIGNED_URL_EXPIRY,
+                expiresIn: null,
                 useLocalStorage: true,
             });
-        }
-
-        if (!isS3Storage()) {
-            return res.status(500).json({ error: 'No storage backend configured' });
         }
 
         const command = new GetObjectCommand({

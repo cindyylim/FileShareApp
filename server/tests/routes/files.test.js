@@ -1334,6 +1334,416 @@ describe('files routes', () => {
         });
     });
 
+    describe('GET /api/files/:id/upload-status', () => {
+        it('returns upload status and recorded chunks for the owner', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'status@example.com',
+                username: 'statususer',
+            });
+
+            const initRes = await agent.post('/api/files/init-upload').send({
+                filename: 'status.txt',
+                size: 100,
+                originalSize: 100,
+                mimeType: 'text/plain',
+            });
+            const { fileId, uploadId } = initRes.body;
+
+            await agent
+                .put('/api/files/local-upload')
+                .query({ fileId, uploadId, partNumber: 1 })
+                .set('Content-Type', 'application/octet-stream')
+                .set('x-chunk-fingerprint', 'fp-status')
+                .send(Buffer.from('partial'));
+
+            const res = await agent.get(`/api/files/${fileId}/upload-status`);
+
+            expect(res.status).toBe(200);
+            expect(res.body.uploadStatus).toBe('uploading');
+            expect(res.body.uploadId).toBe(uploadId);
+            expect(res.body.uploadedChunks).toHaveLength(1);
+            expect(res.body.uploadedChunks[0]).toMatchObject({
+                partNumber: 1,
+                fingerprint: 'fp-status',
+                size: 7,
+            });
+        });
+
+        it('returns 404 when the file is not owned', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'status-other@example.com',
+                username: 'statusother',
+            });
+
+            const ownerId = '66e6e6e6e6e6e6e6e6e6e6e6';
+            const file = await File.create({
+                filename: 'other.txt',
+                originalName: 'other.txt',
+                size: 10,
+                mimeType: 'text/plain',
+                owner: ownerId,
+                s3Bucket: 'local-bucket',
+                s3Key: `users/${ownerId}/status/other.txt`,
+                uploadId: 'upload',
+                uploadStatus: 'uploading',
+            });
+
+            const res = await agent.get(`/api/files/${file._id}/upload-status`);
+
+            expect(res.status).toBe(404);
+            expect(res.body.error).toBe('File not found');
+        });
+
+        it('returns 400 for an invalid id', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'status-invalid@example.com',
+                username: 'statusinvalid',
+            });
+
+            const res = await agent.get('/api/files/not-an-id/upload-status');
+
+            expect(res.status).toBe(400);
+            expect(res.body.error).toBe('Invalid id');
+        });
+
+        it('returns 401 when not authenticated', async () => {
+            const res = await request(app).get('/api/files/66e6e6e6e6e6e6e6e6e6e6e6/upload-status');
+            expect(res.status).toBe(401);
+        });
+    });
+
+    describe('GET /api/files/:id/download', () => {
+        it('returns a local download URL for the owner', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'dlurl@example.com',
+                username: 'dlurluser',
+            });
+
+            const user = await User.findOne({ email: 'dlurl@example.com' });
+            const file = await File.create({
+                filename: 'download-me.txt',
+                originalName: 'download-me.txt',
+                size: 12,
+                mimeType: 'text/plain',
+                owner: user._id,
+                s3Bucket: 'local-bucket',
+                s3Key: `users/${user._id}/dl/download-me.txt`,
+                uploadStatus: 'completed',
+            });
+
+            const res = await agent.get(`/api/files/${file._id}/download`);
+
+            expect(res.status).toBe(200);
+            expect(res.body.useLocalStorage).toBe(true);
+            expect(res.body.filename).toBe('download-me.txt');
+            expect(res.body.downloadUrl).toBe(`/api/files/local-download/${file._id}`);
+            expect(res.body.expiresIn).toBe(null);
+        });
+
+        it('returns a local download URL for a shared recipient', async () => {
+            const ownerAgent = request.agent(app);
+            const recipientAgent = request.agent(app);
+
+            await registerAndLogin(ownerAgent, {
+                email: 'dl-share-owner@example.com',
+                username: 'dlshareowner',
+            });
+            await registerAndLogin(recipientAgent, {
+                email: 'dl-share-recipient@example.com',
+                username: 'dlsharerecipient',
+            });
+
+            const owner = await User.findOne({ email: 'dl-share-owner@example.com' });
+            const file = await File.create({
+                filename: 'shared-dl.txt',
+                originalName: 'shared-dl.txt',
+                size: 8,
+                mimeType: 'text/plain',
+                owner: owner._id,
+                s3Bucket: 'local-bucket',
+                s3Key: `users/${owner._id}/dl/shared-dl.txt`,
+                uploadStatus: 'completed',
+            });
+
+            const shareRes = await ownerAgent
+                .post(`/api/files/${file._id}/share`)
+                .send({ email: 'dl-share-recipient@example.com' });
+            expect(shareRes.status).toBe(200);
+
+            const res = await recipientAgent.get(`/api/files/${file._id}/download`);
+
+            expect(res.status).toBe(200);
+            expect(res.body.downloadUrl).toBe(`/api/files/local-download/${file._id}`);
+            expect(res.body.filename).toBe('shared-dl.txt');
+        });
+
+        it('returns 404 when the file is not completed', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'dl-notready@example.com',
+                username: 'dlnotready',
+            });
+
+            const initRes = await agent.post('/api/files/init-upload').send({
+                filename: 'wip-dl.txt',
+                size: 10,
+                originalSize: 10,
+                mimeType: 'text/plain',
+            });
+
+            const res = await agent.get(`/api/files/${initRes.body.fileId}/download`);
+
+            expect(res.status).toBe(404);
+            expect(res.body.error).toBe('File not found or not ready');
+        });
+
+        it('returns 404 when the file is not owned', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'dl-notowned@example.com',
+                username: 'dlnotowned',
+            });
+
+            const ownerId = '66e6e6e6e6e6e6e6e6e6e6e6';
+            const file = await File.create({
+                filename: 'notowned.txt',
+                originalName: 'notowned.txt',
+                size: 10,
+                mimeType: 'text/plain',
+                owner: ownerId,
+                s3Bucket: 'local-bucket',
+                s3Key: `users/${ownerId}/dl/notowned.txt`,
+                uploadStatus: 'completed',
+            });
+
+            const res = await agent.get(`/api/files/${file._id}/download`);
+
+            expect(res.status).toBe(404);
+            expect(res.body.error).toBe('File not found or not ready');
+        });
+
+        it('returns 401 when not authenticated', async () => {
+            const res = await request(app).get('/api/files/66e6e6e6e6e6e6e6e6e6e6e6/download');
+            expect(res.status).toBe(401);
+        });
+    });
+
+    describe('GET /api/files/local-download/:id', () => {
+        it('streams the file from disk for the owner', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'localdl@example.com',
+                username: 'localdluser',
+            });
+
+            const payload = Buffer.from('hello world');
+            const initRes = await agent.post('/api/files/init-upload').send({
+                filename: 'on-disk.txt',
+                size: payload.length,
+                originalSize: payload.length,
+                mimeType: 'text/plain',
+            });
+            const { fileId, uploadId } = initRes.body;
+
+            const uploadRes = await agent
+                .put('/api/files/local-upload')
+                .query({ fileId, uploadId, partNumber: 1 })
+                .set('Content-Type', 'application/octet-stream')
+                .send(payload);
+
+            const completeRes = await agent.post('/api/files/complete-upload').send({
+                fileId,
+                uploadId,
+                parts: [{ partNumber: 1, etag: uploadRes.headers.etag, size: payload.length }],
+            });
+            expect(completeRes.status).toBe(200);
+
+            const res = await agent.get(`/api/files/local-download/${fileId}`);
+
+            expect(res.status).toBe(200);
+            expect(res.text).toBe('hello world');
+            expect(res.headers['content-disposition']).toContain('on-disk.txt');
+        });
+
+        it('streams the file for a shared recipient', async () => {
+            const ownerAgent = request.agent(app);
+            const recipientAgent = request.agent(app);
+
+            await registerAndLogin(ownerAgent, {
+                email: 'localdl-owner@example.com',
+                username: 'localdlowner',
+            });
+            await registerAndLogin(recipientAgent, {
+                email: 'localdl-recipient@example.com',
+                username: 'localdlrecipient',
+            });
+
+            const payload = Buffer.from('data');
+            const initRes = await ownerAgent.post('/api/files/init-upload').send({
+                filename: 'shared-on-disk.txt',
+                size: payload.length,
+                originalSize: payload.length,
+                mimeType: 'text/plain',
+            });
+            const { fileId, uploadId } = initRes.body;
+
+            const uploadRes = await ownerAgent
+                .put('/api/files/local-upload')
+                .query({ fileId, uploadId, partNumber: 1 })
+                .set('Content-Type', 'application/octet-stream')
+                .send(payload);
+
+            const completeRes = await ownerAgent.post('/api/files/complete-upload').send({
+                fileId,
+                uploadId,
+                parts: [{ partNumber: 1, etag: uploadRes.headers.etag, size: payload.length }],
+            });
+            expect(completeRes.status).toBe(200);
+
+            const shareRes = await ownerAgent
+                .post(`/api/files/${fileId}/share`)
+                .send({ email: 'localdl-recipient@example.com' });
+            expect(shareRes.status).toBe(200);
+
+            const res = await recipientAgent.get(`/api/files/local-download/${fileId}`);
+
+            expect(res.status).toBe(200);
+            expect(res.text).toBe('data');
+        });
+
+        it('returns 404 when file content is missing on disk', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'localdl-nodisk@example.com',
+                username: 'localdlnodisk',
+            });
+
+            const user = await User.findOne({ email: 'localdl-nodisk@example.com' });
+            const file = await File.create({
+                filename: 'ghost.txt',
+                originalName: 'ghost.txt',
+                size: 1,
+                mimeType: 'text/plain',
+                owner: user._id,
+                s3Bucket: 'local-bucket',
+                s3Key: `users/${user._id}/localdl/ghost.txt`,
+                uploadStatus: 'completed',
+            });
+
+            const res = await agent.get(`/api/files/local-download/${file._id}`);
+
+            expect(res.status).toBe(404);
+            expect(res.body.error).toBe('File content not found on disk');
+        });
+
+        it('returns 404 when the file is deleted', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'localdl-deleted@example.com',
+                username: 'localdldeleted',
+            });
+
+            const user = await User.findOne({ email: 'localdl-deleted@example.com' });
+            const file = await File.create({
+                filename: 'deleted.txt',
+                originalName: 'deleted.txt',
+                size: 1,
+                mimeType: 'text/plain',
+                owner: user._id,
+                s3Bucket: 'local-bucket',
+                s3Key: `users/${user._id}/localdl/deleted.txt`,
+                uploadStatus: 'completed',
+            });
+
+            await file.deleteOne();
+
+            const res = await agent.get(`/api/files/local-download/${file._id}`);
+
+            expect(res.status).toBe(404);
+            expect(res.body.error).toBe('File not found or not ready');
+        });
+
+        it('returns 404 when file is uploading', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'localdl-uploading@example.com',
+                username: 'localdluploading',
+            });
+
+            const initRes = await agent.post('/api/files/init-upload').send({
+                filename: 'uploading.txt',
+                size: 10,
+                originalSize: 10,
+                mimeType: 'text/plain',
+            });
+
+            const res = await agent.get(`/api/files/local-download/${initRes.body.fileId}`);
+
+            expect(res.status).toBe(404);
+            expect(res.body.error).toBe('File not found or not ready');
+        });
+
+        it('returns 403 when the user cannot access the file', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'localdl-denied@example.com',
+                username: 'localdldenied',
+            });
+
+            const ownerId = '66e6e6e6e6e6e6e6e6e6e6e6';
+            const file = await File.create({
+                filename: 'secret.txt',
+                originalName: 'secret.txt',
+                size: 1,
+                mimeType: 'text/plain',
+                owner: ownerId,
+                s3Bucket: 'local-bucket',
+                s3Key: `users/${ownerId}/localdl/secret.txt`,
+                uploadStatus: 'completed',
+            });
+
+            const res = await agent.get(`/api/files/local-download/${file._id}`);
+
+            expect(res.status).toBe(403);
+            expect(res.body.error).toBe('Access denied');
+        });
+
+        it('returns 404 when local storage is not enabled', async () => {
+            process.env.USE_LOCAL_STORAGE = 'false';
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'localdl-disabled@example.com',
+                username: 'localdldisabled',
+            });
+
+            const user = await User.findOne({ email: 'localdl-disabled@example.com' });
+            const file = await File.create({
+                filename: 's3-only.txt',
+                originalName: 's3-only.txt',
+                size: 1,
+                mimeType: 'text/plain',
+                owner: user._id,
+                s3Bucket: 'local-bucket',
+                s3Key: `users/${user._id}/localdl/s3-only.txt`,
+                uploadStatus: 'completed',
+            });
+
+            const res = await agent.get(`/api/files/local-download/${file._id}`);
+
+            expect(res.status).toBe(404);
+            expect(res.body.error).toBe('Local storage is not enabled');
+        });
+
+        it('returns 401 when not authenticated', async () => {
+            const res = await request(app).get('/api/files/local-download/66e6e6e6e6e6e6e6e6e6e6e6');
+            expect(res.status).toBe(401);
+        });
+    });
+
     describe('DELETE /api/files/:id in-progress guard', () => {
         it('rejects delete for in-progress uploads', async () => {
             const agent = request.agent(app);
