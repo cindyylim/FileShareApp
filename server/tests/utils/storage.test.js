@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import User from '../../models/User.js';
-import { incrementStorageUsed, storagePayload } from '../../utils/storage.js';
+import {
+    incrementStorageUsed,
+    reserveStorage,
+    releaseStorageReservation,
+    finalizeStorageReservation,
+    storagePayload,
+} from '../../utils/storage.js';
 
 describe('storage utilities', () => {
     let user;
@@ -42,6 +48,57 @@ describe('storage utilities', () => {
             expect(updated.username).toBeUndefined();
             expect(updated.email).toBeUndefined();
             expect(updated.password).toBeUndefined();
+        });
+    });
+
+    describe('reserveStorage', () => {
+        it('reserves bytes in pendingStorage when quota allows', async () => {
+            const updated = await reserveStorage(user._id, 2000);
+
+            expect(updated.pendingStorage).toBe(2000);
+            expect(updated.storageUsed).toBe(1000);
+        });
+
+        it('returns null when reservation would exceed quota', async () => {
+            const updated = await reserveStorage(user._id, 4001);
+
+            expect(updated).toBeNull();
+            const reloaded = await User.findById(user._id);
+            expect(reloaded.pendingStorage).toBe(0);
+        });
+
+        it('returns null when bytes is null', async () => {
+            const updated = await reserveStorage(user._id, null);
+
+            expect(updated).toBeNull();
+            const reloaded = await User.findById(user._id);
+            expect(reloaded.pendingStorage).toBe(0);
+        });
+
+        it('accounts for existing pending storage', async () => {
+            await reserveStorage(user._id, 3000);
+            const second = await reserveStorage(user._id, 1001);
+
+            expect(second).toBeNull();
+        });
+    });
+
+    describe('releaseStorageReservation', () => {
+        it('releases pending storage', async () => {
+            await reserveStorage(user._id, 1500);
+            const updated = await releaseStorageReservation(user._id, 1500);
+
+            expect(updated.pendingStorage).toBe(0);
+        });
+    });
+
+    describe('finalizeStorageReservation', () => {
+        it('moves pending bytes into storageUsed', async () => {
+            await reserveStorage(user._id, 800);
+            const updated = await finalizeStorageReservation(user._id, 800);
+
+            expect(updated.storageUsed).toBe(1800);
+            expect(updated.pendingStorage).toBe(0);
         });
     });
 

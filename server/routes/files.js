@@ -18,7 +18,13 @@ import File from '../models/File.js';
 import User from '../models/User.js';
 import { GetObjectCommand } from '@aws-sdk/client-s3';
 import mongoose from 'mongoose';
-import { incrementStorageUsed, storagePayload } from '../utils/storage.js';
+import {
+    incrementStorageUsed,
+    reserveStorage,
+    releaseStorageReservation,
+    finalizeStorageReservation,
+    storagePayload,
+} from '../utils/storage.js';
 import { saveChunk, assembleFileFromChunks, deleteLocalFile, abortLocalUpload } from '../services/localStorageService.js';
 
 const router = express.Router();
@@ -26,14 +32,53 @@ const router = express.Router();
 const isLocalStorage = () => process.env.USE_LOCAL_STORAGE === 'true';
 const isS3Storage = () => !isLocalStorage();
 
-const upsertChunk = (chunks, chunkData) => {
-    const existing = chunks.find((c) => c.partNumber === chunkData.partNumber);
-    if (existing) {
-        Object.assign(existing, chunkData);
-    } else {
-        chunks.push(chunkData);
+const activeUploadFilter = (fileId, ownerId, uploadId) => ({
+    _id: fileId,
+    owner: ownerId,
+    uploadId,
+    uploadStatus: 'uploading',
+});
+
+/**
+ * Atomically upsert chunk metadata without read-modify-write races.
+ */
+const recordChunkMetadata = async (filter, chunkData) => {
+    const partNumber = chunkData.partNumber;
+    const chunkSet = {
+        'chunks.$[elem].etag': chunkData.etag,
+        'chunks.$[elem].size': chunkData.size,
+        'chunks.$[elem].s3Key': chunkData.s3Key,
+    };
+    if (chunkData.fingerprint !== undefined) {
+        chunkSet['chunks.$[elem].fingerprint'] = chunkData.fingerprint;
     }
+
+    const updated = await File.findOneAndUpdate(
+        { ...filter, 'chunks.partNumber': partNumber },
+        { $set: chunkSet },
+        {
+            arrayFilters: [{ 'elem.partNumber': partNumber }],
+            new: true,
+        }
+    );
+    if (updated) {
+        return updated;
+    }
+
+    return File.findOneAndUpdate(
+        { ...filter, chunks: { $not: { $elemMatch: { partNumber } } } },
+        { $push: { chunks: chunkData } },
+        { new: true }
+    );
 };
+
+const completedFilePayload = (file) => ({
+    id: file._id,
+    filename: file.filename,
+    size: file.size,
+    mimeType: file.mimeType,
+    createdAt: file.createdAt,
+});
 
 /**
  * GET /api/files/shared
@@ -145,9 +190,8 @@ router.post('/init-upload', authenticateToken, async (req, res) => {
             return res.status(400).json({ error: 'Invalid filename' });
         }
 
-        // Check storage quota
-        const user = await User.findById(req.user._id);
-        if (!user.hasStorageSpace(size)) {
+        const reserved = await reserveStorage(req.user._id, size);
+        if (!reserved) {
             return res.status(403).json({
                 error: 'Storage quota exceeded'
             });
@@ -158,44 +202,59 @@ router.post('/init-upload', authenticateToken, async (req, res) => {
         const s3Key = `users/${req.user._id}/${fileId}/${safeFilename}`;
         let uploadId;
 
-        if (isLocalStorage()) {
-            uploadId = fileId.toString();
-        } else if (isS3Storage()) {
-            const createCommand = new CreateMultipartUploadCommand({
-                Bucket: S3_CONFIG.BUCKET_NAME,
-                Key: s3Key,
-                ContentType: mimeType,
-                Metadata: {
-                    userId: req.user._id.toString(),
-                    originalName: filename,
-                },
+        try {
+            if (isLocalStorage()) {
+                uploadId = fileId.toString();
+            } else if (isS3Storage()) {
+                const createCommand = new CreateMultipartUploadCommand({
+                    Bucket: S3_CONFIG.BUCKET_NAME,
+                    Key: s3Key,
+                    ContentType: mimeType,
+                    Metadata: {
+                        userId: req.user._id.toString(),
+                        originalName: filename,
+                    },
+                });
+
+                const multipartUpload = await s3Client.send(createCommand);
+                uploadId = multipartUpload.UploadId;
+            }
+
+            const file = new File({
+                _id: fileId,
+                filename: safeFilename,
+                originalName: safeFilename,
+                size,
+                mimeType,
+                owner: req.user._id,
+                path,
+                s3Bucket: S3_CONFIG.BUCKET_NAME,
+                s3Key,
+                uploadId,
+                uploadStatus: 'uploading',
+                isCompressed,
+                originalSize: isCompressed ? originalSize : size,
             });
 
-            const multipartUpload = await s3Client.send(createCommand);
-            uploadId = multipartUpload.UploadId;
+            await file.save();
+        } catch (initError) {
+            await releaseStorageReservation(req.user._id, size);
+            if (isS3Storage() && uploadId) {
+                try {
+                    await s3Client.send(new AbortMultipartUploadCommand({
+                        Bucket: S3_CONFIG.BUCKET_NAME,
+                        Key: s3Key,
+                        UploadId: uploadId,
+                    }));
+                } catch (abortError) {
+                    console.error('Init upload S3 abort error:', abortError);
+                }
+            }
+            throw initError;
         }
 
-        // Create file document in MongoDB
-        const file = new File({
-            _id: fileId,
-            filename: safeFilename,
-            originalName: safeFilename,
-            size,
-            mimeType,
-            owner: req.user._id,
-            path,
-            s3Bucket: S3_CONFIG.BUCKET_NAME,
-            s3Key,
-            uploadId,
-            uploadStatus: 'uploading',
-            isCompressed,
-            originalSize: isCompressed ? originalSize : size,
-        });
-
-        await file.save();
-
         res.status(201).json({
-            fileId: file._id,
+            fileId,
             uploadId,
             s3Key,
             chunkSize: S3_CONFIG.CHUNK_SIZE,
@@ -222,12 +281,7 @@ router.post('/presigned-url', authenticateToken, async (req, res) => {
             });
         }
 
-        // Verify file belongs to user
-        const file = await File.findOne({
-            _id: fileId,
-            owner: req.user._id,
-            uploadId,
-        });
+        const file = await File.findOne(activeUploadFilter(fileId, req.user._id, uploadId));
 
         if (!file) {
             return res.status(404).json({ error: 'File not found or unauthorized' });
@@ -283,11 +337,7 @@ router.put('/local-upload', authenticateToken, express.raw({ type: '*/*', limit:
             return res.status(400).json({ error: 'Missing fileId, partNumber, or uploadId query parameters' });
         }
 
-        const file = await File.findOne({
-            _id: fileId,
-            owner: req.user._id,
-            uploadId,
-        });
+        const file = await File.findOne(activeUploadFilter(fileId, req.user._id, uploadId));
 
         if (!file) {
             return res.status(404).json({ error: 'File not found or unauthorized' });
@@ -295,14 +345,13 @@ router.put('/local-upload', authenticateToken, express.raw({ type: '*/*', limit:
 
         const etag = await saveChunk(fileId, partNumber, req.body);
         const partNum = parseInt(partNumber, 10);
-        upsertChunk(file.chunks, {
+        await recordChunkMetadata(activeUploadFilter(fileId, req.user._id, uploadId), {
             partNumber: partNum,
             etag,
             size: req.body.length,
             s3Key: file.s3Key,
             fingerprint: req.headers['x-chunk-fingerprint'] || undefined,
         });
-        await file.save();
 
         res.setHeader('ETag', etag);
         res.setHeader('Access-Control-Expose-Headers', 'ETag');
@@ -329,24 +378,19 @@ router.post('/record-chunk', authenticateToken, async (req, res) => {
             return res.status(400).json({ error: 'Please provide fileId, uploadId, partNumber, and etag' });
         }
 
-        const file = await File.findOne({
-            _id: fileId,
-            owner: req.user._id,
-            uploadId,
-        });
+        const file = await File.findOne(activeUploadFilter(fileId, req.user._id, uploadId));
 
         if (!file) {
             return res.status(404).json({ error: 'File not found or unauthorized' });
         }
 
-        upsertChunk(file.chunks, {
+        await recordChunkMetadata(activeUploadFilter(fileId, req.user._id, uploadId), {
             partNumber,
             etag,
             size: size || 0,
             s3Key: file.s3Key,
             fingerprint,
         });
-        await file.save();
 
         res.json({ message: 'Chunk recorded' });
     } catch (error) {
@@ -361,34 +405,57 @@ router.post('/record-chunk', authenticateToken, async (req, res) => {
  */
 router.post('/complete-upload', authenticateToken, async (req, res) => {
     let file;
-    try {
-        const { fileId, uploadId, parts, hash } = req.body;
+    let claimed = false;
+    const { fileId, uploadId, parts, hash } = req.body;
 
+    try {
         if (!fileId || !uploadId || !parts || !Array.isArray(parts)) {
             return res.status(400).json({
                 error: 'Please provide fileId, uploadId, and parts array'
             });
         }
 
-        file = await File.findOne({
+        const alreadyCompleted = await File.findOne({
             _id: fileId,
             owner: req.user._id,
-            uploadId,
+            uploadStatus: 'completed',
         });
+        if (alreadyCompleted) {
+            const owner = await User.findById(req.user._id).select('storageUsed storageQuota');
+            return res.json({
+                message: 'Upload already completed',
+                file: completedFilePayload(alreadyCompleted),
+                user: storagePayload(owner),
+            });
+        }
+
+        file = await File.findOneAndUpdate(
+            activeUploadFilter(fileId, req.user._id, uploadId),
+            { $set: { uploadStatus: 'completing' } },
+            { new: true }
+        );
 
         if (!file) {
             return res.status(404).json({ error: 'File not found or unauthorized' });
         }
-
-        const owner = await User.findById(req.user._id);
-        if (!owner.hasStorageSpace(file.size)) {
-            return res.status(403).json({ error: 'Storage quota exceeded' });
-        }
+        claimed = true;
 
         const totalPartSize = parts.reduce((sum, part) => sum + (part.size || 0), 0);
         if (totalPartSize > file.size) {
+            await File.findOneAndUpdate(
+                { _id: file._id, uploadStatus: 'completing' },
+                { $set: { uploadStatus: 'uploading' } }
+            );
             return res.status(400).json({ error: 'Uploaded parts exceed declared file size' });
         }
+
+        const chunks = parts.map(part => ({
+            partNumber: part.partNumber,
+            etag: part.etag,
+            size: part.size || 0,
+            s3Key: file.s3Key,
+            fingerprint: part.fingerprint,
+        }));
 
         if (isLocalStorage()) {
             await assembleFileFromChunks(fileId, file.s3Key, parts);
@@ -407,34 +474,49 @@ router.post('/complete-upload', authenticateToken, async (req, res) => {
 
             await s3Client.send(completeCommand);
         } else {
+            await File.findOneAndUpdate(
+                { _id: file._id, uploadStatus: 'completing' },
+                { $set: { uploadStatus: 'failed' } }
+            );
             return res.status(500).json({ error: 'No storage backend configured' });
         }
 
-        // Update file document
-        file.chunks = parts.map(part => ({
-            partNumber: part.partNumber,
-            etag: part.etag,
-            size: part.size || 0,
-            s3Key: file.s3Key,
-            fingerprint: part.fingerprint, // Store chunk fingerprint
-        }));
-        file.uploadStatus = 'completed';
-        file.uploadId = undefined; // Clear upload ID
-        file.hash = hash;
+        const session = await mongoose.startSession();
+        session.startTransaction();
 
-        await file.save();
+        let updatedFile;
+        let updatedUser;
+        try {
+            updatedFile = await File.findOneAndUpdate(
+                { _id: file._id, owner: req.user._id, uploadStatus: 'completing' },
+                {
+                    $set: {
+                        uploadStatus: 'completed',
+                        chunks,
+                        hash,
+                    },
+                    $unset: { uploadId: 1 },
+                },
+                { session, new: true }
+            );
 
-        const updatedUser = await incrementStorageUsed(req.user._id, file.size);
+            if (!updatedFile) {
+                await session.abortTransaction();
+                return res.status(409).json({ error: 'Upload state conflict' });
+            }
+
+            updatedUser = await finalizeStorageReservation(req.user._id, file.size, session);
+            await session.commitTransaction();
+        } catch (txError) {
+            await session.abortTransaction();
+            throw txError;
+        } finally {
+            session.endSession();
+        }
 
         res.json({
             message: 'Upload completed successfully',
-            file: {
-                id: file._id,
-                filename: file.filename,
-                size: file.size,
-                mimeType: file.mimeType,
-                createdAt: file.createdAt,
-            },
+            file: completedFilePayload(updatedFile),
             user: storagePayload(updatedUser),
         });
     } catch (error) {
@@ -450,6 +532,14 @@ router.post('/complete-upload', authenticateToken, async (req, res) => {
                 await s3Client.send(abortCommand);
             } catch (abortError) {
                 console.error('Abort upload error:', abortError);
+            }
+        }
+
+        if (isLocalStorage() && file) {
+            try {
+                await deleteLocalFile(file.s3Key);
+            } catch (deleteError) {
+                console.error('Delete local file error:', deleteError);
             }
         }
 
@@ -600,16 +690,46 @@ router.get('/local-download/:id', authenticateToken, validateObjectId('id'), req
  * Delete file
  */
 router.delete('/:id', authenticateToken, validateObjectId('id'), async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
     try {
-        const file = await File.findOne({
-            _id: req.params.id,
-            owner: req.user._id,
-            isDeleted: false,
-        });
+        const file = await File.findOneAndUpdate(
+            {
+                _id: req.params.id,
+                owner: req.user._id,
+                isDeleted: false,
+                uploadStatus: 'completed',
+            },
+            { $set: { isDeleted: true, sharedWith: [] } },
+            { session, new: true }
+        );
 
         if (!file) {
+            await session.abortTransaction();
+            const inProgress = await File.findOne({
+                _id: req.params.id,
+                owner: req.user._id,
+                isDeleted: false,
+                uploadStatus: { $in: ['uploading', 'completing'] },
+            });
+            if (inProgress) {
+                return res.status(400).json({
+                    error: 'Cannot delete in-progress upload; abort it first',
+                });
+            }
             return res.status(404).json({ error: 'File not found' });
         }
+
+        await User.updateMany(
+            { sharedFiles: file._id },
+            { $pull: { sharedFiles: file._id } },
+            { session }
+        );
+
+        const updatedUser = await incrementStorageUsed(req.user._id, -file.size, session);
+
+        await session.commitTransaction();
 
         if (isLocalStorage()) {
             try {
@@ -617,32 +737,28 @@ router.delete('/:id', authenticateToken, validateObjectId('id'), async (req, res
             } catch (unlinkErr) {
                 console.warn('Could not delete local file:', unlinkErr.message);
             }
-        } else if (isS3Storage() && file.uploadStatus === 'completed') {
-            const deleteCommand = new DeleteObjectCommand({
-                Bucket: S3_CONFIG.BUCKET_NAME,
-                Key: file.s3Key,
-            });
-            await s3Client.send(deleteCommand);
+        } else if (isS3Storage()) {
+            try {
+                const deleteCommand = new DeleteObjectCommand({
+                    Bucket: S3_CONFIG.BUCKET_NAME,
+                    Key: file.s3Key,
+                });
+                await s3Client.send(deleteCommand);
+            } catch (s3Err) {
+                console.warn('Could not delete S3 object:', s3Err.message);
+            }
         }
-
-        await User.updateMany(
-            { sharedFiles: file._id },
-            { $pull: { sharedFiles: file._id } }
-        );
-
-        file.isDeleted = true;
-        file.sharedWith = [];
-        await file.save();
-
-        const updatedUser = await incrementStorageUsed(req.user._id, -file.size);
 
         res.json({
             message: 'File deleted successfully',
             user: storagePayload(updatedUser),
         });
     } catch (error) {
+        await session.abortTransaction();
         console.error('Delete file error:', error);
         res.status(500).json({ error: 'Server error while deleting file' });
+    } finally {
+        session.endSession();
     }
 });
 
@@ -652,15 +768,25 @@ router.delete('/:id', authenticateToken, validateObjectId('id'), async (req, res
  */
 router.post('/:id/abort-upload', authenticateToken, validateObjectId('id'), async (req, res) => {
     try {
-        const file = await File.findOne({
+        const file = await File.findOneAndDelete({
             _id: req.params.id,
             owner: req.user._id,
             uploadStatus: 'uploading',
         });
 
         if (!file) {
+            const completing = await File.findOne({
+                _id: req.params.id,
+                owner: req.user._id,
+                uploadStatus: 'completing',
+            });
+            if (completing) {
+                return res.status(409).json({ error: 'Upload is being finalized' });
+            }
             return res.status(404).json({ error: 'Active upload not found' });
         }
+
+        await releaseStorageReservation(req.user._id, file.size);
 
         if (isLocalStorage()) {
             await abortLocalUpload(file._id, file.s3Key);
@@ -672,8 +798,6 @@ router.post('/:id/abort-upload', authenticateToken, validateObjectId('id'), asyn
             });
             await s3Client.send(abortCommand);
         }
-
-        await File.findByIdAndDelete(file._id);
 
         res.json({ message: 'Upload aborted' });
     } catch (error) {
@@ -687,55 +811,67 @@ router.post('/:id/abort-upload', authenticateToken, validateObjectId('id'), asyn
  * Share a file with another user
  */
 router.post('/:id/share', authenticateToken, validateObjectId('id'), async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
     try {
         const { email } = req.body;
         const fileId = req.params.id;
 
         if (!email) {
+            await session.abortTransaction();
             return res.status(400).json({ error: 'Email is required' });
         }
 
-        // Find the file to share
+        const targetUser = await User.findOne({ email: email.toLowerCase() });
+        if (!targetUser) {
+            await session.abortTransaction();
+            return res.status(400).json({ error: 'Unable to share with this user' });
+        }
+
+        if (targetUser._id.equals(req.user._id)) {
+            await session.abortTransaction();
+            return res.status(400).json({ error: 'Cannot share file with yourself' });
+        }
+
         const file = await File.findOne({
             _id: fileId,
             owner: req.user._id,
             isDeleted: false,
-        });
+            uploadStatus: 'completed',
+        }).session(session);
 
         if (!file) {
+            await session.abortTransaction();
             return res.status(404).json({ error: 'File not found or unauthorized' });
         }
 
-        // Find the user to share with
-        const targetUser = await User.findOne({ email: email.toLowerCase() });
-        if (!targetUser) {
-            return res.status(400).json({ error: 'Unable to share with this user' });
-        }
+        const shareResult = await File.updateOne(
+            {
+                _id: fileId,
+                isDeleted: false,
+                sharedWith: { $ne: targetUser._id },
+            },
+            { $addToSet: { sharedWith: targetUser._id } },
+            { session }
+        );
 
-        // Check if file is already shared with this user
-        if (file.sharedWith.includes(targetUser._id)) {
+        if (shareResult.modifiedCount === 0) {
+            await session.abortTransaction();
+            const stillExists = await File.findOne({ _id: fileId, isDeleted: false });
+            if (!stillExists) {
+                return res.status(404).json({ error: 'File not found or unauthorized' });
+            }
             return res.status(400).json({ error: 'File already shared with this user' });
         }
 
-        // Check if trying to share with self
-        if (targetUser._id.toString() === req.user._id.toString()) {
-            return res.status(400).json({ error: 'Cannot share file with yourself' });
-        }
+        await User.updateOne(
+            { _id: targetUser._id },
+            { $addToSet: { sharedFiles: fileId } },
+            { session }
+        );
 
-        const session = await mongoose.startSession();
-        session.startTransaction();
-        try {
-            file.sharedWith.push(targetUser._id);
-            await file.save({ session });
-            targetUser.sharedFiles.push(file._id);
-            await targetUser.save({ session });
-            await session.commitTransaction();
-        } catch (txError) {
-            await session.abortTransaction();
-            throw txError;
-        } finally {
-            session.endSession();
-        }
+        await session.commitTransaction();
 
         res.json({
             message: 'File shared successfully',
@@ -746,8 +882,11 @@ router.post('/:id/share', authenticateToken, validateObjectId('id'), async (req,
             },
         });
     } catch (error) {
+        await session.abortTransaction();
         console.error('Share file error:', error);
         res.status(500).json({ error: 'Server error while sharing file' });
+    } finally {
+        session.endSession();
     }
 });
 
@@ -756,47 +895,51 @@ router.post('/:id/share', authenticateToken, validateObjectId('id'), async (req,
  * Unshare a file with a specific user
  */
 router.delete('/:id/unshare/:userId', authenticateToken, validateObjectId('id'), validateObjectId('userId'), async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
     try {
         const { id: fileId, userId } = req.params;
 
-        // Find the file
         const file = await File.findOne({
             _id: fileId,
             owner: req.user._id,
             isDeleted: false,
-        });
+        }).session(session);
 
         if (!file) {
+            await session.abortTransaction();
             return res.status(404).json({ error: 'File not found or unauthorized' });
         }
 
-        // Find the user to unshare from
-        const targetUser = await User.findById(userId);
+        const targetUser = await User.findById(userId).session(session);
         if (!targetUser) {
+            await session.abortTransaction();
             return res.status(404).json({ error: 'User not found' });
         }
 
-        const session = await mongoose.startSession();
-        session.startTransaction();
-        try {
-            file.sharedWith = file.sharedWith.filter(id => id.toString() !== userId);
-            await file.save({ session });
-            targetUser.sharedFiles = targetUser.sharedFiles.filter(id => id.toString() !== fileId);
-            await targetUser.save({ session });
-            await session.commitTransaction();
-        } catch (txError) {
-            await session.abortTransaction();
-            throw txError;
-        } finally {
-            session.endSession();
-        }
+        await File.updateOne(
+            { _id: fileId, isDeleted: false },
+            { $pull: { sharedWith: targetUser._id } },
+            { session }
+        );
+        await User.updateOne(
+            { _id: targetUser._id },
+            { $pull: { sharedFiles: fileId } },
+            { session }
+        );
+
+        await session.commitTransaction();
 
         res.json({
             message: 'File unshared successfully',
         });
     } catch (error) {
+        await session.abortTransaction();
         console.error('Unshare file error:', error);
         res.status(500).json({ error: 'Server error while unsharing file' });
+    } finally {
+        session.endSession();
     }
 });
 

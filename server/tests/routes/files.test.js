@@ -238,6 +238,52 @@ describe('files routes', () => {
         });
     });
 
+    describe('POST /api/files/complete-upload', () => {
+        it('returns idempotent success when upload is already completed', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, { email: 'complete@example.com', username: 'completeuser' });
+
+            const user = await User.findOne({ email: 'complete@example.com' });
+            const file = await File.create({
+                filename: 'done.txt',
+                originalName: 'done.txt',
+                size: 50,
+                mimeType: 'text/plain',
+                owner: user._id,
+                s3Bucket: 'local-bucket',
+                s3Key: `users/${user._id}/done/done.txt`,
+                uploadStatus: 'completed',
+            });
+
+            const res = await agent.post('/api/files/complete-upload').send({
+                fileId: file._id,
+                uploadId: 'stale-upload-id',
+                parts: [{ partNumber: 1, etag: '"abc"', size: 50 }],
+            });
+
+            expect(res.status).toBe(200);
+            expect(res.body.message).toBe('Upload already completed');
+            expect(res.body.file.id).toBe(file._id.toString());
+        });
+    });
+
+    describe('DELETE /api/files/:id in-progress guard', () => {
+        it('rejects delete for in-progress uploads', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, { email: 'inprog@example.com', username: 'inproguser' });
+
+            const initRes = await agent.post('/api/files/init-upload').send({
+                filename: 'wip.txt',
+                size: 100,
+                mimeType: 'text/plain',
+            });
+
+            const res = await agent.delete(`/api/files/${initRes.body.fileId}`);
+            expect(res.status).toBe(400);
+            expect(res.body.error).toContain('abort');
+        });
+    });
+
     describe('POST /api/files/:id/abort-upload', () => {
         it('aborts an in-progress upload and cleans up local chunks', async () => {
             const agent = request.agent(app);

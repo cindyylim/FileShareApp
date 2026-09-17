@@ -15,6 +15,8 @@ function FileUpload({ onUploadComplete, onError }) {
     const fileInputRef = useRef(null);
     const activeUploadRef = useRef(null);
     const abortRef = useRef(false);
+    const uploadInProgressRef = useRef(false);
+    const completingRef = useRef(false);
 
     const handleFileSelect = (file) => {
         setSelectedFile(file);
@@ -76,8 +78,9 @@ function FileUpload({ onUploadComplete, onError }) {
     };
 
     const uploadFile = async () => {
-        if (!selectedFile) return;
+        if (!selectedFile || uploadInProgressRef.current) return;
 
+        uploadInProgressRef.current = true;
         setUploading(true);
         setProgress(0);
         setError('');
@@ -209,7 +212,10 @@ function FileUpload({ onUploadComplete, onError }) {
             // Sort parts by partNumber
             parts.sort((a, b) => a.partNumber - b.partNumber);
 
-            // Step 11: Complete upload
+            // Step 11: Complete upload (guard against duplicate complete calls)
+            if (completingRef.current) return;
+            completingRef.current = true;
+
             const completeResponse = await fileAPI.completeUpload({
                 fileId,
                 uploadId,
@@ -242,6 +248,8 @@ function FileUpload({ onUploadComplete, onError }) {
             }
             console.error('Upload error:', err);
         } finally {
+            completingRef.current = false;
+            uploadInProgressRef.current = false;
             setUploading(false);
             activeUploadRef.current = null;
         }

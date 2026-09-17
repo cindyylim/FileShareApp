@@ -90,7 +90,7 @@ const fileSchema = new mongoose.Schema({
     // Upload status
     uploadStatus: {
         type: String,
-        enum: ['pending', 'uploading', 'completed', 'failed'],
+        enum: ['pending', 'uploading', 'completing', 'completed', 'failed'],
         default: 'pending',
     },
     sharedWith: [{

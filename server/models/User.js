@@ -27,6 +27,10 @@ const userSchema = new mongoose.Schema({
         type: Number,
         default: 0, // in bytes
     },
+    pendingStorage: {
+        type: Number,
+        default: 0, // bytes reserved by in-progress uploads
+    },
     storageQuota: {
         type: Number,
         default: 5 * 1024 * 1024 * 1024, // 5GB default quota
