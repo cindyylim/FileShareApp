@@ -17,9 +17,6 @@ export const saveChunk = async (fileId, partNumber, data) => {
 
 export const assembleFileFromChunks = async (fileId, s3Key, parts) => {
     const finalFilePath = path.join(LOCAL_STORAGE_DIR, s3Key);
-    await fs.promises.mkdir(path.dirname(finalFilePath), { recursive: true });
-
-    const writeStream = fs.createWriteStream(finalFilePath);
     const sortedParts = [...parts].sort((a, b) => a.partNumber - b.partNumber);
     const chunkDir = path.join(LOCAL_STORAGE_DIR, 'chunks', fileId.toString());
 
@@ -28,6 +25,13 @@ export const assembleFileFromChunks = async (fileId, s3Key, parts) => {
         if (!fs.existsSync(chunkPath)) {
             throw new Error(`Missing chunk ${part.partNumber}`);
         }
+    }
+
+    await fs.promises.mkdir(path.dirname(finalFilePath), { recursive: true });
+    const writeStream = fs.createWriteStream(finalFilePath);
+
+    for (const part of sortedParts) {
+        const chunkPath = path.join(chunkDir, `part-${part.partNumber}`);
         const chunkBuffer = await fs.promises.readFile(chunkPath);
         writeStream.write(chunkBuffer);
     }

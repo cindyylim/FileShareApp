@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import fs from 'fs';
 import path from 'path';
@@ -22,7 +22,7 @@ const registerAndLogin = async (agent, user = {}) => {
 };
 
 describe('files routes', () => {
-    beforeEach(async () => {
+    beforeAll(async () => {
         process.env.USE_LOCAL_STORAGE = 'true';
         const uploadDir = './test-uploads';
         process.env.LOCAL_STORAGE_DIR = uploadDir;
@@ -30,6 +30,16 @@ describe('files routes', () => {
             fs.rmSync(uploadDir, { recursive: true, force: true });
         }
         await fs.promises.mkdir(uploadDir, { recursive: true });
+    });
+    afterAll(async () => {
+        const uploadDir = './test-uploads';
+        if (fs.existsSync(uploadDir)) {
+            fs.rmSync(uploadDir, { recursive: true, force: true });
+        }
+    });
+
+    beforeEach(() => {
+        process.env.USE_LOCAL_STORAGE = 'true';
     });
 
     describe('POST /api/files/init-upload', () => {
@@ -855,143 +865,6 @@ describe('files routes', () => {
         });
     });
 
-    describe('POST /api/files/:id/share', () => {
-        it('shares a file with another user', async () => {
-            const ownerAgent = request.agent(app);
-            const recipientAgent = request.agent(app);
-
-            await registerAndLogin(ownerAgent, {
-                email: 'owner@example.com',
-                username: 'owner',
-            });
-            await registerAndLogin(recipientAgent, {
-                email: 'recipient@example.com',
-                username: 'recipient',
-            });
-
-            const owner = await User.findOne({ email: 'owner@example.com' });
-            const file = await File.create({
-                filename: 'shared.txt',
-                originalName: 'shared.txt',
-                size: 100,
-                mimeType: 'text/plain',
-                owner: owner._id,
-                s3Bucket: 'local-bucket',
-                s3Key: `users/${owner._id}/file2/shared.txt`,
-                uploadStatus: 'completed',
-            });
-
-            const res = await ownerAgent
-                .post(`/api/files/${file._id}/share`)
-                .send({ email: 'recipient@example.com' });
-
-            expect(res.status).toBe(200);
-            expect(res.body.message).toBe('File shared successfully');
-            expect(res.body.sharedWith.email).toBe('recipient@example.com');
-
-            const updatedFile = await File.findById(file._id);
-            expect(updatedFile.sharedWith).toHaveLength(1);
-        });
-
-        it('prevents sharing with yourself', async () => {
-            const agent = request.agent(app);
-            await registerAndLogin(agent, { email: 'self@example.com', username: 'selfuser' });
-
-            const user = await User.findOne({ email: 'self@example.com' });
-            const file = await File.create({
-                filename: 'solo.txt',
-                originalName: 'solo.txt',
-                size: 100,
-                mimeType: 'text/plain',
-                owner: user._id,
-                s3Bucket: 'local-bucket',
-                s3Key: `users/${user._id}/file3/solo.txt`,
-                uploadStatus: 'completed',
-            });
-
-            const res = await agent
-                .post(`/api/files/${file._id}/share`)
-                .send({ email: 'self@example.com' });
-
-            expect(res.status).toBe(400);
-            expect(res.body.error).toBe('Cannot share file with yourself');
-        });
-    });
-
-    describe('DELETE /api/files/:id/unshare/:userId', () => {
-        it('unshares a file with a specific user', async () => {
-            const ownerAgent = request.agent(app);
-            const recipientAgent = request.agent(app);
-
-            await registerAndLogin(ownerAgent, {
-                email: 'unshare-owner@example.com',
-                username: 'unshareowner',
-            });
-            await registerAndLogin(recipientAgent, {
-                email: 'unshare-recipient@example.com',
-                username: 'unsharerecipient',
-            });
-
-            const owner = await User.findOne({ email: 'unshare-owner@example.com' });
-            const recipient = await User.findOne({ email: 'unshare-recipient@example.com' });
-            const file = await File.create({
-                filename: 'unshare-me.txt',
-                originalName: 'unshare-me.txt',
-                size: 100,
-                mimeType: 'text/plain',
-                owner: owner._id,
-                s3Bucket: 'local-bucket',
-                s3Key: `users/${owner._id}/unshare/unshare-me.txt`,
-                uploadStatus: 'completed',
-            });
-
-            const shareRes = await ownerAgent
-                .post(`/api/files/${file._id}/share`)
-                .send({ email: 'unshare-recipient@example.com' });
-            expect(shareRes.status).toBe(200);
-
-            const res = await ownerAgent.delete(`/api/files/${file._id}/unshare/${recipient._id}`);
-
-            expect(res.status).toBe(200);
-            expect(res.body.message).toBe('File unshared successfully');
-
-            const updatedFile = await File.findById(file._id);
-            expect(updatedFile.sharedWith).toHaveLength(0);
-
-            const updatedRecipient = await User.findById(recipient._id);
-            expect(updatedRecipient.sharedFiles.map(String)).not.toContain(file._id.toString());
-        });
-    });
-
-    describe('DELETE /api/files/:id', () => {
-        it('deletes an owned file', async () => {
-            const agent = request.agent(app);
-            await registerAndLogin(agent, { email: 'delete@example.com', username: 'deleteuser' });
-
-            const user = await User.findOne({ email: 'delete@example.com' });
-            const file = await File.create({
-                filename: 'todelete.txt',
-                originalName: 'todelete.txt',
-                size: 200,
-                mimeType: 'text/plain',
-                owner: user._id,
-                s3Bucket: 'local-bucket',
-                s3Key: `users/${user._id}/file4/todelete.txt`,
-                uploadStatus: 'completed',
-            });
-
-            const res = await agent.delete(`/api/files/${file._id}`);
-
-            expect(res.status).toBe(200);
-            expect(res.body.message).toBe('File deleted successfully');
-
-            const deleted = await File.findById(file._id);
-            expect(deleted.isDeleted).toBe(true);
-            expect(deleted.sharedWith).toHaveLength(0);
-        });
-    });
-
-
     describe('POST /api/files/record-chunk', () => {
         it('rejects chunk recording when using local storage', async () => {
             const agent = request.agent(app);
@@ -1744,7 +1617,7 @@ describe('files routes', () => {
         });
     });
 
-    describe('DELETE /api/files/:id in-progress guard', () => {
+    describe('DELETE /api/files/:id', () => {
         it('rejects delete for in-progress uploads', async () => {
             const agent = request.agent(app);
             await registerAndLogin(agent, { email: 'inprog@example.com', username: 'inproguser' });
@@ -1758,7 +1631,160 @@ describe('files routes', () => {
 
             const res = await agent.delete(`/api/files/${initRes.body.fileId}`);
             expect(res.status).toBe(400);
-            expect(res.body.error).toContain('abort');
+            expect(res.body.error).toBe('Cannot delete in-progress upload; abort it first');
+        });
+        
+        it('removes the assembled local file and decrements storage', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'delete-storage@example.com',
+                username: 'deletestorage',
+            });
+
+            const payload = Buffer.from('delete-me');
+            const initRes = await agent.post('/api/files/init-upload').send({
+                filename: 'assembled-delete.txt',
+                size: payload.length,
+                originalSize: payload.length,
+                mimeType: 'text/plain',
+            });
+            const { fileId, uploadId, s3Key } = initRes.body;
+
+            const uploadRes = await agent
+                .put('/api/files/local-upload')
+                .query({ fileId, uploadId, partNumber: 1 })
+                .set('Content-Type', 'application/octet-stream')
+                .send(payload);
+
+            const completeRes = await agent.post('/api/files/complete-upload').send({
+                fileId,
+                uploadId,
+                parts: [{ partNumber: 1, etag: uploadRes.headers.etag, size: payload.length }],
+            });
+            expect(completeRes.status).toBe(200);
+            expect(fs.existsSync(path.join(LOCAL_STORAGE_DIR, s3Key))).toBe(true);
+
+            const res = await agent.delete(`/api/files/${fileId}`);
+            expect(res.status).toBe(200);
+            expect(res.body.user.storageUsed).toBe(0);
+            expect(fs.existsSync(path.join(LOCAL_STORAGE_DIR, s3Key))).toBe(false);
+
+            const file = await File.findById(fileId);
+            expect(file.isDeleted).toBe(true);
+            expect(file.sharedWith).toHaveLength(0);
+
+            const user = await User.findOne({ email: 'delete-storage@example.com' });
+            expect(user.storageUsed).toBe(0);
+        });
+
+        it('clears the file from recipients sharedFiles', async () => {
+            const ownerAgent = request.agent(app);
+            const recipientAgent = request.agent(app);
+
+            await registerAndLogin(ownerAgent, {
+                email: 'delete-share-owner@example.com',
+                username: 'deleteshareowner',
+            });
+            await registerAndLogin(recipientAgent, {
+                email: 'delete-share-recipient@example.com',
+                username: 'deletesharerecipient',
+            });
+
+            const owner = await User.findOne({ email: 'delete-share-owner@example.com' });
+            const recipient = await User.findOne({ email: 'delete-share-recipient@example.com' });
+            const file = await File.create({
+                filename: 'shared-delete.txt',
+                originalName: 'shared-delete.txt',
+                size: 50,
+                mimeType: 'text/plain',
+                owner: owner._id,
+                s3Bucket: 'local-bucket',
+                s3Key: `users/${owner._id}/delete/shared-delete.txt`,
+                uploadStatus: 'completed',
+            });
+
+            const shareRes = await ownerAgent
+                .post(`/api/files/${file._id}/share`)
+                .send({ email: 'delete-share-recipient@example.com' });
+            expect(shareRes.status).toBe(200);
+
+            const res = await ownerAgent.delete(`/api/files/${file._id}`);
+            expect(res.status).toBe(200);
+
+            const updatedRecipient = await User.findById(recipient._id);
+            expect(updatedRecipient.sharedFiles.map(String)).not.toContain(file._id.toString());
+
+            const deleted = await File.findById(file._id);
+            expect(deleted.sharedWith).toHaveLength(0);
+        });
+
+        it('returns 404 when the file is not owned', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'delete-other@example.com',
+                username: 'deleteother',
+            });
+
+            const ownerId = '66e6e6e6e6e6e6e6e6e6e6e6';
+            const file = await File.create({
+                filename: 'not-mine.txt',
+                originalName: 'not-mine.txt',
+                size: 10,
+                mimeType: 'text/plain',
+                owner: ownerId,
+                s3Bucket: 'local-bucket',
+                s3Key: `users/${ownerId}/delete/not-mine.txt`,
+                uploadStatus: 'completed',
+            });
+
+            const res = await agent.delete(`/api/files/${file._id}`);
+
+            expect(res.status).toBe(404);
+            expect(res.body.error).toBe('File not found');
+        });
+
+        it('returns 404 when the file is already deleted', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'delete-again@example.com',
+                username: 'deleteagain',
+            });
+
+            const user = await User.findOne({ email: 'delete-again@example.com' });
+            const file = await File.create({
+                filename: 'gone.txt',
+                originalName: 'gone.txt',
+                size: 10,
+                mimeType: 'text/plain',
+                owner: user._id,
+                s3Bucket: 'local-bucket',
+                s3Key: `users/${user._id}/delete/gone.txt`,
+                uploadStatus: 'completed',
+                isDeleted: true,
+            });
+
+            const res = await agent.delete(`/api/files/${file._id}`);
+
+            expect(res.status).toBe(404);
+            expect(res.body.error).toBe('File not found');
+        });
+
+        it('returns 400 for an invalid id', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'delete-invalid@example.com',
+                username: 'deleteinvalid',
+            });
+
+            const res = await agent.delete('/api/files/not-an-id');
+
+            expect(res.status).toBe(400);
+            expect(res.body.error).toBe('Invalid id');
+        });
+
+        it('returns 401 when not authenticated', async () => {
+            const res = await request(app).delete('/api/files/66e6e6e6e6e6e6e6e6e6e6e6');
+            expect(res.status).toBe(401);
         });
     });
 
@@ -1774,7 +1800,7 @@ describe('files routes', () => {
                 mimeType: 'text/plain',
             });
 
-            const { fileId, uploadId } = initRes.body;
+            const { fileId, uploadId, s3Key } = initRes.body;
 
             await agent
                 .put(`/api/files/local-upload?fileId=${fileId}&uploadId=${uploadId}&partNumber=1`)
@@ -1788,8 +1814,417 @@ describe('files routes', () => {
             const file = await File.findById(fileId);
             expect(file).toBeNull();
 
-            const chunkDir = path.join(process.env.LOCAL_STORAGE_DIR || './test-uploads', 'chunks', fileId);
+            const chunkDir = path.join(LOCAL_STORAGE_DIR, 'chunks', fileId);
             expect(fs.existsSync(chunkDir)).toBe(false);
+            expect(fs.existsSync(path.join(LOCAL_STORAGE_DIR, s3Key))).toBe(false);
+
+            const user = await User.findOne({ email: 'abort@example.com' });
+            expect(user.storageUsed).toBe(0);
+            expect(user.pendingStorage).toBe(0);
+        });
+
+        it('returns 409 when the upload is being finalized', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'abort-completing@example.com',
+                username: 'abortcompleting',
+            });
+
+            const user = await User.findOne({ email: 'abort-completing@example.com' });
+            const file = await File.create({
+                filename: 'finalizing.txt',
+                originalName: 'finalizing.txt',
+                size: 50,
+                mimeType: 'text/plain',
+                owner: user._id,
+                s3Bucket: 'local-bucket',
+                s3Key: `users/${user._id}/abort/finalizing.txt`,
+                uploadId: 'upload',
+                uploadStatus: 'completing',
+            });
+
+            const res = await agent.post(`/api/files/${file._id}/abort-upload`);
+
+            expect(res.status).toBe(409);
+            expect(res.body.error).toBe('Upload is being finalized');
+
+            const stillThere = await File.findById(file._id);
+            expect(stillThere).not.toBeNull();
+            expect(stillThere.uploadStatus).toBe('completing');
+        });
+
+        it('returns 404 when there is no active upload', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'abort-404@example.com',
+                username: 'abort404',
+            });
+
+            const user = await User.findOne({ email: 'abort-404@example.com' });
+            const file = await File.create({
+                filename: 'already-done.txt',
+                originalName: 'already-done.txt',
+                size: 50,
+                mimeType: 'text/plain',
+                owner: user._id,
+                s3Bucket: 'local-bucket',
+                s3Key: `users/${user._id}/abort/already-done.txt`,
+                uploadStatus: 'completed',
+            });
+
+            const res = await agent.post(`/api/files/${file._id}/abort-upload`);
+
+            expect(res.status).toBe(404);
+            expect(res.body.error).toBe('Active upload not found');
+        });
+
+        it('returns 401 when not authenticated', async () => {
+            const res = await request(app).post('/api/files/66e6e6e6e6e6e6e6e6e6e6e6/abort-upload');
+            expect(res.status).toBe(401);
+        });
+
+        it('returns 400 for an invalid id', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'abort-invalid@example.com',
+                username: 'abortinvalid',
+            });
+
+            const res = await agent.post('/api/files/not-an-id/abort-upload');
+            expect(res.status).toBe(400);
+            expect(res.body.error).toBe('Invalid id');
+        });
+    });
+
+    describe('POST /api/files/:id/share', () => {
+        it('shares a file with another user', async () => {
+            const ownerAgent = request.agent(app);
+            const recipientAgent = request.agent(app);
+
+            await registerAndLogin(ownerAgent, {
+                email: 'owner@example.com',
+                username: 'owner',
+            });
+            await registerAndLogin(recipientAgent, {
+                email: 'recipient@example.com',
+                username: 'recipient',
+            });
+
+            const owner = await User.findOne({ email: 'owner@example.com' });
+            const file = await File.create({
+                filename: 'shared.txt',
+                originalName: 'shared.txt',
+                size: 100,
+                mimeType: 'text/plain',
+                owner: owner._id,
+                s3Bucket: 'local-bucket',
+                s3Key: `users/${owner._id}/file2/shared.txt`,
+                uploadStatus: 'completed',
+            });
+
+            const res = await ownerAgent
+                .post(`/api/files/${file._id}/share`)
+                .send({ email: 'recipient@example.com' });
+
+            expect(res.status).toBe(200);
+            expect(res.body.message).toBe('File shared successfully');
+            expect(res.body.sharedWith.email).toBe('recipient@example.com');
+
+            const updatedFile = await File.findById(file._id);
+            expect(updatedFile.sharedWith).toHaveLength(1);
+        });
+
+        it('prevents sharing with yourself', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, { email: 'self@example.com', username: 'selfuser' });
+
+            const user = await User.findOne({ email: 'self@example.com' });
+            const file = await File.create({
+                filename: 'solo.txt',
+                originalName: 'solo.txt',
+                size: 100,
+                mimeType: 'text/plain',
+                owner: user._id,
+                s3Bucket: 'local-bucket',
+                s3Key: `users/${user._id}/file3/solo.txt`,
+                uploadStatus: 'completed',
+            });
+
+            const res = await agent
+                .post(`/api/files/${file._id}/share`)
+                .send({ email: 'self@example.com' });
+
+            expect(res.status).toBe(400);
+            expect(res.body.error).toBe('Cannot share file with yourself');
+        });
+
+        it('returns 400 when email is missing', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'share-noemail@example.com',
+                username: 'sharenomail',
+            });
+
+            const user = await User.findOne({ email: 'share-noemail@example.com' });
+            const file = await File.create({
+                filename: 'needs-email.txt',
+                originalName: 'needs-email.txt',
+                size: 10,
+                mimeType: 'text/plain',
+                owner: user._id,
+                s3Bucket: 'local-bucket',
+                s3Key: `users/${user._id}/share/needs-email.txt`,
+                uploadStatus: 'completed',
+            });
+
+            const res = await agent.post(`/api/files/${file._id}/share`).send({});
+
+            expect(res.status).toBe(400);
+            expect(res.body.error).toBe('Email is required');
+        });
+
+        it('returns 400 when the target user does not exist', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'share-nouser@example.com',
+                username: 'sharenouser',
+            });
+
+            const user = await User.findOne({ email: 'share-nouser@example.com' });
+            const file = await File.create({
+                filename: 'ghost-user.txt',
+                originalName: 'ghost-user.txt',
+                size: 10,
+                mimeType: 'text/plain',
+                owner: user._id,
+                s3Bucket: 'local-bucket',
+                s3Key: `users/${user._id}/share/ghost-user.txt`,
+                uploadStatus: 'completed',
+            });
+
+            const res = await agent
+                .post(`/api/files/${file._id}/share`)
+                .send({ email: 'nobody@example.com' });
+
+            expect(res.status).toBe(400);
+            expect(res.body.error).toBe('Unable to share with this user');
+        });
+
+        it('returns 404 when the file is not found or unauthorized', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'share-404@example.com',
+                username: 'share404',
+            });
+            await registerAndLogin(request.agent(app), {
+                email: 'share-404-target@example.com',
+                username: 'share404target',
+            });
+
+            const ownerId = '66e6e6e6e6e6e6e6e6e6e6e6';
+            const file = await File.create({
+                filename: 'not-mine.txt',
+                originalName: 'not-mine.txt',
+                size: 10,
+                mimeType: 'text/plain',
+                owner: ownerId,
+                s3Bucket: 'local-bucket',
+                s3Key: `users/${ownerId}/share/not-mine.txt`,
+                uploadStatus: 'completed',
+            });
+
+            const res = await agent
+                .post(`/api/files/${file._id}/share`)
+                .send({ email: 'share-404-target@example.com' });
+
+            expect(res.status).toBe(404);
+            expect(res.body.error).toBe('File not found or unauthorized');
+        });
+
+        it('returns 400 when the file is already shared with this user', async () => {
+            const ownerAgent = request.agent(app);
+            const recipientAgent = request.agent(app);
+
+            await registerAndLogin(ownerAgent, {
+                email: 'share-again-owner@example.com',
+                username: 'shareagainowner',
+            });
+            await registerAndLogin(recipientAgent, {
+                email: 'share-again-recipient@example.com',
+                username: 'shareagainrecipient',
+            });
+
+            const owner = await User.findOne({ email: 'share-again-owner@example.com' });
+            const file = await File.create({
+                filename: 'twice.txt',
+                originalName: 'twice.txt',
+                size: 10,
+                mimeType: 'text/plain',
+                owner: owner._id,
+                s3Bucket: 'local-bucket',
+                s3Key: `users/${owner._id}/share/twice.txt`,
+                uploadStatus: 'completed',
+            });
+
+            const first = await ownerAgent
+                .post(`/api/files/${file._id}/share`)
+                .send({ email: 'share-again-recipient@example.com' });
+            expect(first.status).toBe(200);
+
+            const second = await ownerAgent
+                .post(`/api/files/${file._id}/share`)
+                .send({ email: 'share-again-recipient@example.com' });
+
+            expect(second.status).toBe(400);
+            expect(second.body.error).toBe('File already shared with this user');
+        });
+
+        it('returns 404 when the file is deleted before share is applied', async () => {
+            const ownerAgent = request.agent(app);
+            await registerAndLogin(ownerAgent, {
+                email: 'share-deleted@example.com',
+                username: 'sharedeleted',
+            });
+            await registerAndLogin(request.agent(app), {
+                email: 'share-deleted-target@example.com',
+                username: 'sharedeletedtarget',
+            });
+
+            const owner = await User.findOne({ email: 'share-deleted@example.com' });
+            const file = await File.create({
+                filename: 'vanishing.txt',
+                originalName: 'vanishing.txt',
+                size: 10,
+                mimeType: 'text/plain',
+                owner: owner._id,
+                s3Bucket: 'local-bucket',
+                s3Key: `users/${owner._id}/share/vanishing.txt`,
+                uploadStatus: 'completed',
+            });
+
+            const spy = vi.spyOn(File, 'updateOne').mockImplementation(async (filter) => {
+                if (filter?.sharedWith) {
+                    await File.collection.updateOne(
+                        { _id: file._id },
+                        { $set: { isDeleted: true } }
+                    );
+                    return { modifiedCount: 0 };
+                }
+                return File.collection.updateOne(filter);
+            });
+
+            try {
+                const res = await ownerAgent
+                    .post(`/api/files/${file._id}/share`)
+                    .send({ email: 'share-deleted-target@example.com' });
+
+                expect(res.status).toBe(404);
+                expect(res.body.error).toBe('File not found or unauthorized');
+            } finally {
+                spy.mockRestore();
+            }
+        });
+    });
+
+    describe('DELETE /api/files/:id/unshare/:userId', () => {
+        it('unshares a file with a specific user', async () => {
+            const ownerAgent = request.agent(app);
+            const recipientAgent = request.agent(app);
+
+            await registerAndLogin(ownerAgent, {
+                email: 'unshare-owner@example.com',
+                username: 'unshareowner',
+            });
+            await registerAndLogin(recipientAgent, {
+                email: 'unshare-recipient@example.com',
+                username: 'unsharerecipient',
+            });
+
+            const owner = await User.findOne({ email: 'unshare-owner@example.com' });
+            const recipient = await User.findOne({ email: 'unshare-recipient@example.com' });
+            const file = await File.create({
+                filename: 'unshare-me.txt',
+                originalName: 'unshare-me.txt',
+                size: 100,
+                mimeType: 'text/plain',
+                owner: owner._id,
+                s3Bucket: 'local-bucket',
+                s3Key: `users/${owner._id}/unshare/unshare-me.txt`,
+                uploadStatus: 'completed',
+            });
+
+            const shareRes = await ownerAgent
+                .post(`/api/files/${file._id}/share`)
+                .send({ email: 'unshare-recipient@example.com' });
+            expect(shareRes.status).toBe(200);
+
+            const res = await ownerAgent.delete(`/api/files/${file._id}/unshare/${recipient._id}`);
+
+            expect(res.status).toBe(200);
+            expect(res.body.message).toBe('File unshared successfully');
+
+            const updatedFile = await File.findById(file._id);
+            expect(updatedFile.sharedWith).toHaveLength(0);
+
+            const updatedRecipient = await User.findById(recipient._id);
+            expect(updatedRecipient.sharedFiles.map(String)).not.toContain(file._id.toString());
+        });
+
+        it('returns 404 when the file is not found or unauthorized', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'unshare-404@example.com',
+                username: 'unshare404',
+            });
+            await registerAndLogin(request.agent(app), {
+                email: 'unshare-404-target@example.com',
+                username: 'unshare404target',
+            });
+
+            const target = await User.findOne({ email: 'unshare-404-target@example.com' });
+            const ownerId = '66e6e6e6e6e6e6e6e6e6e6e6';
+            const file = await File.create({
+                filename: 'not-mine.txt',
+                originalName: 'not-mine.txt',
+                size: 10,
+                mimeType: 'text/plain',
+                owner: ownerId,
+                s3Bucket: 'local-bucket',
+                s3Key: `users/${ownerId}/unshare/not-mine.txt`,
+                uploadStatus: 'completed',
+            });
+
+            const res = await agent.delete(`/api/files/${file._id}/unshare/${target._id}`);
+
+            expect(res.status).toBe(404);
+            expect(res.body.error).toBe('File not found or unauthorized');
+        });
+
+        it('returns 404 when the target user is not found', async () => {
+            const agent = request.agent(app);
+            await registerAndLogin(agent, {
+                email: 'unshare-nouser@example.com',
+                username: 'unsharenouser',
+            });
+
+            const user = await User.findOne({ email: 'unshare-nouser@example.com' });
+            const file = await File.create({
+                filename: 'orphan-share.txt',
+                originalName: 'orphan-share.txt',
+                size: 10,
+                mimeType: 'text/plain',
+                owner: user._id,
+                s3Bucket: 'local-bucket',
+                s3Key: `users/${user._id}/unshare/orphan-share.txt`,
+                uploadStatus: 'completed',
+            });
+
+            const res = await agent.delete(
+                `/api/files/${file._id}/unshare/66e6e6e6e6e6e6e6e6e6e6e6`
+            );
+
+            expect(res.status).toBe(404);
+            expect(res.body.error).toBe('User not found');
         });
     });
 });
