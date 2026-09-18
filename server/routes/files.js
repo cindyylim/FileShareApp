@@ -710,7 +710,7 @@ router.delete('/:id', authenticateToken, validateObjectId('id'), async (req, res
             } catch (unlinkErr) {
                 console.warn('Could not delete local file:', unlinkErr.message);
             }
-        } else if (isS3Storage()) {
+        } else {
             try {
                 const deleteCommand = new DeleteObjectCommand({
                     Bucket: S3_CONFIG.BUCKET_NAME,
